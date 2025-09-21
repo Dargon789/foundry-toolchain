@@ -1,30 +1,46 @@
-const core = require('@actions/core')
-const tc = require('@actions/tool-cache')
-const path = require('path')
-const { getDownloadObject } = require('./utils')
+const core = require("@actions/core");
+const toolCache = require("@actions/tool-cache");
+const path = require("path");
 
-async function setup() {
+const { restoreRPCCache } = require("./cache");
+const { getDownloadObject } = require("./utils");
+
+async function main() {
   try {
-    // Get version
-    const version = core.getInput('version')
+    // Get version input
+    const version = core.getInput("version");
 
-    // Download tarball
-    const download = getDownloadObject(version)
-    const pathToTarBall = await tc.downloadTool(download.url)
+    // Download the archive containing the binaries
+    const download = getDownloadObject(version);
+    core.info(`Downloading Foundry '${version}' from: ${download.url}`);
+    const pathToArchive = await toolCache.downloadTool(download.url);
 
-    // Extract the tarball onto host runner
-    const extract = download.url.endsWith('.zip') ? tc.extractZip : tc.extractTar
-    const pathToCLI = await extract(pathToTarBall)
+    // Extract the archive onto host runner
+    core.debug(`Extracting ${pathToArchive}`);
+    const extract = download.url.endsWith(".zip") ? toolCache.extractZip : toolCache.extractTar;
+    const pathToCLI = await extract(pathToArchive);
 
     // Expose the tool
-    core.addPath(path.join(pathToCLI, download.binPath))
-  } catch (e) {
-    core.setFailed(e)
+    core.addPath(path.join(pathToCLI, download.binPath));
+
+    // Get cache input
+    const cache = core.getBooleanInput("cache");
+
+    // If cache input is false, skip restoring cache
+    if (!cache) {
+      core.info("Cache not requested, not restoring cache");
+      return;
+    }
+
+    // Restore the RPC cache
+    await restoreRPCCache();
+  } catch (err) {
+    core.setFailed(err);
   }
 }
 
-module.exports = setup
+module.exports = main;
 
 if (require.main === module) {
-  setup()
+  main();
 }
