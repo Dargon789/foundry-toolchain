@@ -6,37 +6,54 @@ toolkit for Ethereum application development.
 ### Example workflow
 
 ```yml
-on: [push]
+name: CI
 
-name: test
+permissions: {}
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  FOUNDRY_PROFILE: ci
 
 jobs:
   check:
     name: Foundry project
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
+          persist-credentials: false
           submodules: recursive
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
-      - name: Run tests
-        run: forge test -vvv
+      - name: Show Forge version
+        run: forge --version
 
-      - name: Run snapshot
-        run: forge snapshot
+      - name: Run Forge fmt
+        run: forge fmt --check
+
+      - name: Run Forge build
+        run: forge build --sizes
+
+      - name: Run Forge tests
+        run: forge test -vvv
 ```
 
 ### Inputs
 
-| **Name**             | **Required** | **Default**                           | **Description**                                                 | **Type** |
-| -------------------- | ------------ | ------------------------------------- | --------------------------------------------------------------- | -------- |
-| `cache`              | No           | `true`                                | Whether to cache RPC responses or not.                          | bool     |
-| `version`            | No           | `stable`                              | Version to install, e.g. `stable`, `rc`, `nightly` or `v0.3.0`. | string   |
-| `cache-key`          | No           | `${{ github.job }}-${{ github.sha }}` | The cache key to use for caching.                               | string   |
-| `cache-restore-keys` | No           | `[${{ github.job }}-]`                | The cache keys to use for restoring the cache.                  | string[] |
+| **Name**             | **Required** | **Default**                           | **Description**                                                                                                               | **Type** |
+| -------------------- | ------------ | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | -------- |
+| `cache`              | No           | `true`                                | Whether to cache RPC responses or not.                                                                                        | bool     |
+| `version`            | No           | `stable`                              | Version to install, e.g. `stable`, `rc`, `nightly` or any [SemVer](https://semver.org/) tag prefixed with `v` (e.g. `v1.3.6`) | string   |
+| `cache-key`          | No           | `${{ github.job }}-${{ github.sha }}` | The cache key to use for caching.                                                                                             | string   |
+| `cache-restore-keys` | No           | `[${{ github.job }}-]`                | The cache keys to use for restoring the cache.                                                                                | string[] |
 
 ### RPC Caching
 
@@ -131,10 +148,10 @@ When opening a PR, you must build the action exactly following the below steps f
 Install [nvm](https://github.com/nvm-sh/nvm).
 
 ```console
-$ nvm install 24.8.0
+$ nvm install 24.9.0
 $ nvm use
-$ npm ci
+$ npm ci --ignore-scripts
 $ npm run build
 ```
 
-You **must** use the Node.js version `24.8.0` to build.
+You **must** use the Node.js version `24.9.0` to build.
