@@ -48,17 +48,17 @@ jobs:
 
 ### Inputs
 
-| **Name**             | **Required** | **Default**                           | **Description**                                                                                                               | **Type** |
-| -------------------- | ------------ | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | -------- |
-| `version`            | No           | `stable`                              | Version to install, e.g. `stable`, `rc`, `nightly` or any [SemVer](https://semver.org/) tag prefixed with `v` (e.g. `v1.3.6`) | string   |
-| `network`            | No           | `ethereum`                            | Network version to install, e.g. `ethereum`, `tempo`.                                                                         | string   |
-| `cache`              | No           | `true`                                | Whether to cache RPC responses or not.                                                                                        | bool     |
-| `cache-key`          | No           | `${{ github.job }}-${{ github.sha }}` | The cache key to use for caching.                                                                                             | string   |
-| `cache-restore-keys` | No           | `[${{ github.job }}-]`                | The cache keys to use for restoring the cache.                                                                                | string[] |
+| **Name**             | **Required** | **Default**                           | **Description**                                                                                                                                       | **Type** |
+| -------------------- | ------------ | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| `version`            | No           | `stable`                              | Version to install, e.g. `stable`, `rc`, `nightly` or any [SemVer](https://semver.org/) version with or without `v` prefix (e.g. `v1.5.0` or `1.5.0`) | string   |
+| `network`            | No           | `ethereum`                            | Network version to install, e.g. `ethereum`, `tempo`.                                                                                                 | string   |
+| `cache`              | No           | `true`                                | Whether to cache Foundry data or not.                                                                                                                | bool     |
+| `cache-key`          | No           | `${{ github.job }}-${{ github.sha }}` | The cache key to use for caching.                                                                                                                     | string   |
+| `cache-restore-keys` | No           | `[${{ github.job }}-]`                | The cache keys to use for restoring the cache.                                                                                                        | string[] |
 
-### RPC Caching
+### Caching
 
-By default, this action matches Forge's behavior and caches all RPC responses in the `~/.foundry/cache/rpc` directory.
+By default, this action matches Forge's behavior and caches all RPC responses, Etherscan queries, and other data in the `~/.foundry/cache` directory.
 This is done to speed up the tests and avoid hitting the rate limit of your RPC provider.
 
 The logic of the caching is as follows:
@@ -122,7 +122,7 @@ For more detail on how to delete caches, read GitHub's docs on
 
 #### Fuzzing
 
-Note that if you are fuzzing in your fork tests, the RPC cache strategy above will not work unless you set a
+Note that if you are fuzzing in your fork tests, the cache strategy above will not work unless you set a
 [fuzz seed](https://book.getfoundry.sh/reference/config/testing#seed). You might also want to reduce your number of RPC
 calls by using [Multicall](https://github.com/mds1/multicall).
 
@@ -149,9 +149,9 @@ When opening a PR, you must build the action exactly following the below steps f
 Install [nvm](https://github.com/nvm-sh/nvm).
 
 ```console
-$ nvm install 24.9.0
 $ nvm use
 $ npm ci --ignore-scripts
+$ npm run typecheck
 $ npm run build
 ```
 
