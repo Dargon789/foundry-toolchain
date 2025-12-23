@@ -50,4 +50,3 @@ runs:
   main: "dist/index.js"
   post: "dist/save/index.js"
   post-if: success()
-  
