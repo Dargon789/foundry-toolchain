@@ -17,7 +17,7 @@ GitHub Action that installs Foundry (Ethereum development toolkit) and caches Fo
 
 ## Code Style
 
-- TypeScript (ESM with `import`/`export`)
+- JavaScript (CommonJS with `require`/`module.exports`)
 - Prettier: 2 spaces, double quotes, trailing commas, 120 char line width
 - Use `@actions/*` packages for GitHub Actions APIs
 - JSDoc comments for functions
