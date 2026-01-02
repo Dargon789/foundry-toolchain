@@ -39,7 +39,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.saveCache = exports.restoreCache = exports.isFeatureAvailable = exports.ReserveCacheError = exports.ValidationError = void 0;
+exports.saveCache = exports.restoreCache = exports.isFeatureAvailable = exports.FinalizeCacheError = exports.ReserveCacheError = exports.ValidationError = void 0;
 const core = __importStar(__nccwpck_require__(37484));
 const path = __importStar(__nccwpck_require__(16928));
 const utils = __importStar(__nccwpck_require__(98299));
@@ -47,7 +47,6 @@ const cacheHttpClient = __importStar(__nccwpck_require__(73171));
 const cacheTwirpClient = __importStar(__nccwpck_require__(96819));
 const config_1 = __nccwpck_require__(17606);
 const tar_1 = __nccwpck_require__(95321);
-const constants_1 = __nccwpck_require__(58287);
 const http_client_1 = __nccwpck_require__(54844);
 class ValidationError extends Error {
     constructor(message) {
@@ -65,6 +64,14 @@ class ReserveCacheError extends Error {
     }
 }
 exports.ReserveCacheError = ReserveCacheError;
+class FinalizeCacheError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'FinalizeCacheError';
+        Object.setPrototypeOf(this, FinalizeCacheError.prototype);
+    }
+}
+exports.FinalizeCacheError = FinalizeCacheError;
 function checkPaths(paths) {
     if (!paths || paths.length === 0) {
         throw new ValidationError(`Path Validation Error: At least one directory or file path is required`);
@@ -441,10 +448,6 @@ function saveCacheV2(paths, key, options, enableCrossOsArchive = false) {
             }
             const archiveFileSize = utils.getArchiveFileSizeInBytes(archivePath);
             core.debug(`File Size: ${archiveFileSize}`);
-            // For GHES, this check will take place in ReserveCache API with enterprise file size limit
-            if (archiveFileSize > constants_1.CacheFileSizeLimit && !(0, config_1.isGhes)()) {
-                throw new Error(`Cache size of ~${Math.round(archiveFileSize / (1024 * 1024))} MB (${archiveFileSize} B) is over the 10GB limit, not saving cache.`);
-            }
             // Set the archive size in the options, will be used to display the upload progress
             options.archiveSizeBytes = archiveFileSize;
             core.debug('Reserving Cache');
@@ -457,7 +460,10 @@ function saveCacheV2(paths, key, options, enableCrossOsArchive = false) {
             try {
                 const response = yield twirpClient.CreateCacheEntry(request);
                 if (!response.ok) {
-                    throw new Error('Response was not ok');
+                    if (response.message) {
+                        core.warning(`Cache reservation failed: ${response.message}`);
+                    }
+                    throw new Error(response.message || 'Response was not ok');
                 }
                 signedUploadUrl = response.signedUploadUrl;
             }
@@ -475,6 +481,9 @@ function saveCacheV2(paths, key, options, enableCrossOsArchive = false) {
             const finalizeResponse = yield twirpClient.FinalizeCacheEntryUpload(finalizeRequest);
             core.debug(`FinalizeCacheEntryUploadResponse: ${finalizeResponse.ok}`);
             if (!finalizeResponse.ok) {
+                if (finalizeResponse.message) {
+                    throw new FinalizeCacheError(finalizeResponse.message);
+                }
                 throw new Error(`Unable to finalize cache with key ${key}, another job may be finalizing this cache.`);
             }
             cacheId = parseInt(finalizeResponse.entryId);
@@ -486,6 +495,9 @@ function saveCacheV2(paths, key, options, enableCrossOsArchive = false) {
             }
             else if (typedError.name === ReserveCacheError.name) {
                 core.info(`Failed to save: ${typedError.message}`);
+            }
+            else if (typedError.name === FinalizeCacheError.name) {
+                core.warning(typedError.message);
             }
             else {
                 // Log server errors (5xx) as errors, all other errors as warnings
@@ -598,11 +610,12 @@ class CreateCacheEntryResponse$Type extends runtime_5.MessageType {
     constructor() {
         super("github.actions.results.api.v1.CreateCacheEntryResponse", [
             { no: 1, name: "ok", kind: "scalar", T: 8 /*ScalarType.BOOL*/ },
-            { no: 2, name: "signed_upload_url", kind: "scalar", T: 9 /*ScalarType.STRING*/ }
+            { no: 2, name: "signed_upload_url", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 3, name: "message", kind: "scalar", T: 9 /*ScalarType.STRING*/ }
         ]);
     }
     create(value) {
-        const message = { ok: false, signedUploadUrl: "" };
+        const message = { ok: false, signedUploadUrl: "", message: "" };
         globalThis.Object.defineProperty(message, runtime_4.MESSAGE_TYPE, { enumerable: false, value: this });
         if (value !== undefined)
             (0, runtime_3.reflectionMergePartial)(this, message, value);
@@ -618,6 +631,9 @@ class CreateCacheEntryResponse$Type extends runtime_5.MessageType {
                     break;
                 case /* string signed_upload_url */ 2:
                     message.signedUploadUrl = reader.string();
+                    break;
+                case /* string message */ 3:
+                    message.message = reader.string();
                     break;
                 default:
                     let u = options.readUnknownField;
@@ -637,6 +653,9 @@ class CreateCacheEntryResponse$Type extends runtime_5.MessageType {
         /* string signed_upload_url = 2; */
         if (message.signedUploadUrl !== "")
             writer.tag(2, runtime_1.WireType.LengthDelimited).string(message.signedUploadUrl);
+        /* string message = 3; */
+        if (message.message !== "")
+            writer.tag(3, runtime_1.WireType.LengthDelimited).string(message.message);
         let u = options.writeUnknownFields;
         if (u !== false)
             (u == true ? runtime_2.UnknownFieldHandler.onWrite : u)(this.typeName, message, writer);
@@ -720,11 +739,12 @@ class FinalizeCacheEntryUploadResponse$Type extends runtime_5.MessageType {
     constructor() {
         super("github.actions.results.api.v1.FinalizeCacheEntryUploadResponse", [
             { no: 1, name: "ok", kind: "scalar", T: 8 /*ScalarType.BOOL*/ },
-            { no: 2, name: "entry_id", kind: "scalar", T: 3 /*ScalarType.INT64*/ }
+            { no: 2, name: "entry_id", kind: "scalar", T: 3 /*ScalarType.INT64*/ },
+            { no: 3, name: "message", kind: "scalar", T: 9 /*ScalarType.STRING*/ }
         ]);
     }
     create(value) {
-        const message = { ok: false, entryId: "0" };
+        const message = { ok: false, entryId: "0", message: "" };
         globalThis.Object.defineProperty(message, runtime_4.MESSAGE_TYPE, { enumerable: false, value: this });
         if (value !== undefined)
             (0, runtime_3.reflectionMergePartial)(this, message, value);
@@ -740,6 +760,9 @@ class FinalizeCacheEntryUploadResponse$Type extends runtime_5.MessageType {
                     break;
                 case /* int64 entry_id */ 2:
                     message.entryId = reader.int64().toString();
+                    break;
+                case /* string message */ 3:
+                    message.message = reader.string();
                     break;
                 default:
                     let u = options.readUnknownField;
@@ -759,6 +782,9 @@ class FinalizeCacheEntryUploadResponse$Type extends runtime_5.MessageType {
         /* int64 entry_id = 2; */
         if (message.entryId !== "0")
             writer.tag(2, runtime_1.WireType.Varint).int64(message.entryId);
+        /* string message = 3; */
+        if (message.message !== "")
+            writer.tag(3, runtime_1.WireType.LengthDelimited).string(message.message);
         let u = options.writeUnknownFields;
         if (u !== false)
             (u == true ? runtime_2.UnknownFieldHandler.onWrite : u)(this.typeName, message, writer);
@@ -7661,909 +7687,6 @@ function copyFile(srcFile, destFile, force) {
     });
 }
 //# sourceMappingURL=io.js.map
-
-/***/ }),
-
-/***/ 58036:
-/***/ (function(module, exports, __nccwpck_require__) {
-
-"use strict";
-
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || function (mod) {
-    if (mod && mod.__esModule) return mod;
-    var result = {};
-    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
-    __setModuleDefault(result, mod);
-    return result;
-};
-var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
-    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
-    return new (P || (P = Promise))(function (resolve, reject) {
-        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
-        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
-        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
-        step((generator = generator.apply(thisArg, _arguments || [])).next());
-    });
-};
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports._readLinuxVersionFile = exports._getOsVersion = exports._findMatch = void 0;
-const semver = __importStar(__nccwpck_require__(39318));
-const core_1 = __nccwpck_require__(37484);
-// needs to be require for core node modules to be mocked
-/* eslint @typescript-eslint/no-require-imports: 0 */
-const os = __nccwpck_require__(70857);
-const cp = __nccwpck_require__(35317);
-const fs = __nccwpck_require__(79896);
-function _findMatch(versionSpec, stable, candidates, archFilter) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const platFilter = os.platform();
-        let result;
-        let match;
-        let file;
-        for (const candidate of candidates) {
-            const version = candidate.version;
-            (0, core_1.debug)(`check ${version} satisfies ${versionSpec}`);
-            if (semver.satisfies(version, versionSpec) &&
-                (!stable || candidate.stable === stable)) {
-                file = candidate.files.find(item => {
-                    (0, core_1.debug)(`${item.arch}===${archFilter} && ${item.platform}===${platFilter}`);
-                    let chk = item.arch === archFilter && item.platform === platFilter;
-                    if (chk && item.platform_version) {
-                        const osVersion = module.exports._getOsVersion();
-                        if (osVersion === item.platform_version) {
-                            chk = true;
-                        }
-                        else {
-                            chk = semver.satisfies(osVersion, item.platform_version);
-                        }
-                    }
-                    return chk;
-                });
-                if (file) {
-                    (0, core_1.debug)(`matched ${candidate.version}`);
-                    match = candidate;
-                    break;
-                }
-            }
-        }
-        if (match && file) {
-            // clone since we're mutating the file list to be only the file that matches
-            result = Object.assign({}, match);
-            result.files = [file];
-        }
-        return result;
-    });
-}
-exports._findMatch = _findMatch;
-function _getOsVersion() {
-    // TODO: add windows and other linux, arm variants
-    // right now filtering on version is only an ubuntu and macos scenario for tools we build for hosted (python)
-    const plat = os.platform();
-    let version = '';
-    if (plat === 'darwin') {
-        version = cp.execSync('sw_vers -productVersion').toString();
-    }
-    else if (plat === 'linux') {
-        // lsb_release process not in some containers, readfile
-        // Run cat /etc/lsb-release
-        // DISTRIB_ID=Ubuntu
-        // DISTRIB_RELEASE=18.04
-        // DISTRIB_CODENAME=bionic
-        // DISTRIB_DESCRIPTION="Ubuntu 18.04.4 LTS"
-        const lsbContents = module.exports._readLinuxVersionFile();
-        if (lsbContents) {
-            const lines = lsbContents.split('\n');
-            for (const line of lines) {
-                const parts = line.split('=');
-                if (parts.length === 2 &&
-                    (parts[0].trim() === 'VERSION_ID' ||
-                        parts[0].trim() === 'DISTRIB_RELEASE')) {
-                    version = parts[1].trim().replace(/^"/, '').replace(/"$/, '');
-                    break;
-                }
-            }
-        }
-    }
-    return version;
-}
-exports._getOsVersion = _getOsVersion;
-function _readLinuxVersionFile() {
-    const lsbReleaseFile = '/etc/lsb-release';
-    const osReleaseFile = '/etc/os-release';
-    let contents = '';
-    if (fs.existsSync(lsbReleaseFile)) {
-        contents = fs.readFileSync(lsbReleaseFile).toString();
-    }
-    else if (fs.existsSync(osReleaseFile)) {
-        contents = fs.readFileSync(osReleaseFile).toString();
-    }
-    return contents;
-}
-exports._readLinuxVersionFile = _readLinuxVersionFile;
-//# sourceMappingURL=manifest.js.map
-
-/***/ }),
-
-/***/ 67380:
-/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
-
-"use strict";
-
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || function (mod) {
-    if (mod && mod.__esModule) return mod;
-    var result = {};
-    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
-    __setModuleDefault(result, mod);
-    return result;
-};
-var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
-    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
-    return new (P || (P = Promise))(function (resolve, reject) {
-        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
-        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
-        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
-        step((generator = generator.apply(thisArg, _arguments || [])).next());
-    });
-};
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.RetryHelper = void 0;
-const core = __importStar(__nccwpck_require__(37484));
-/**
- * Internal class for retries
- */
-class RetryHelper {
-    constructor(maxAttempts, minSeconds, maxSeconds) {
-        if (maxAttempts < 1) {
-            throw new Error('max attempts should be greater than or equal to 1');
-        }
-        this.maxAttempts = maxAttempts;
-        this.minSeconds = Math.floor(minSeconds);
-        this.maxSeconds = Math.floor(maxSeconds);
-        if (this.minSeconds > this.maxSeconds) {
-            throw new Error('min seconds should be less than or equal to max seconds');
-        }
-    }
-    execute(action, isRetryable) {
-        return __awaiter(this, void 0, void 0, function* () {
-            let attempt = 1;
-            while (attempt < this.maxAttempts) {
-                // Try
-                try {
-                    return yield action();
-                }
-                catch (err) {
-                    if (isRetryable && !isRetryable(err)) {
-                        throw err;
-                    }
-                    core.info(err.message);
-                }
-                // Sleep
-                const seconds = this.getSleepAmount();
-                core.info(`Waiting ${seconds} seconds before trying again`);
-                yield this.sleep(seconds);
-                attempt++;
-            }
-            // Last attempt
-            return yield action();
-        });
-    }
-    getSleepAmount() {
-        return (Math.floor(Math.random() * (this.maxSeconds - this.minSeconds + 1)) +
-            this.minSeconds);
-    }
-    sleep(seconds) {
-        return __awaiter(this, void 0, void 0, function* () {
-            return new Promise(resolve => setTimeout(resolve, seconds * 1000));
-        });
-    }
-}
-exports.RetryHelper = RetryHelper;
-//# sourceMappingURL=retry-helper.js.map
-
-/***/ }),
-
-/***/ 33472:
-/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
-
-"use strict";
-
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || function (mod) {
-    if (mod && mod.__esModule) return mod;
-    var result = {};
-    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
-    __setModuleDefault(result, mod);
-    return result;
-};
-var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
-    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
-    return new (P || (P = Promise))(function (resolve, reject) {
-        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
-        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
-        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
-        step((generator = generator.apply(thisArg, _arguments || [])).next());
-    });
-};
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.evaluateVersions = exports.isExplicitVersion = exports.findFromManifest = exports.getManifestFromRepo = exports.findAllVersions = exports.find = exports.cacheFile = exports.cacheDir = exports.extractZip = exports.extractXar = exports.extractTar = exports.extract7z = exports.downloadTool = exports.HTTPError = void 0;
-const core = __importStar(__nccwpck_require__(37484));
-const io = __importStar(__nccwpck_require__(94994));
-const crypto = __importStar(__nccwpck_require__(76982));
-const fs = __importStar(__nccwpck_require__(79896));
-const mm = __importStar(__nccwpck_require__(58036));
-const os = __importStar(__nccwpck_require__(70857));
-const path = __importStar(__nccwpck_require__(16928));
-const httpm = __importStar(__nccwpck_require__(54844));
-const semver = __importStar(__nccwpck_require__(39318));
-const stream = __importStar(__nccwpck_require__(2203));
-const util = __importStar(__nccwpck_require__(39023));
-const assert_1 = __nccwpck_require__(42613);
-const exec_1 = __nccwpck_require__(95236);
-const retry_helper_1 = __nccwpck_require__(67380);
-class HTTPError extends Error {
-    constructor(httpStatusCode) {
-        super(`Unexpected HTTP response: ${httpStatusCode}`);
-        this.httpStatusCode = httpStatusCode;
-        Object.setPrototypeOf(this, new.target.prototype);
-    }
-}
-exports.HTTPError = HTTPError;
-const IS_WINDOWS = process.platform === 'win32';
-const IS_MAC = process.platform === 'darwin';
-const userAgent = 'actions/tool-cache';
-/**
- * Download a tool from an url and stream it into a file
- *
- * @param url       url of tool to download
- * @param dest      path to download tool
- * @param auth      authorization header
- * @param headers   other headers
- * @returns         path to downloaded tool
- */
-function downloadTool(url, dest, auth, headers) {
-    return __awaiter(this, void 0, void 0, function* () {
-        dest = dest || path.join(_getTempDirectory(), crypto.randomUUID());
-        yield io.mkdirP(path.dirname(dest));
-        core.debug(`Downloading ${url}`);
-        core.debug(`Destination ${dest}`);
-        const maxAttempts = 3;
-        const minSeconds = _getGlobal('TEST_DOWNLOAD_TOOL_RETRY_MIN_SECONDS', 10);
-        const maxSeconds = _getGlobal('TEST_DOWNLOAD_TOOL_RETRY_MAX_SECONDS', 20);
-        const retryHelper = new retry_helper_1.RetryHelper(maxAttempts, minSeconds, maxSeconds);
-        return yield retryHelper.execute(() => __awaiter(this, void 0, void 0, function* () {
-            return yield downloadToolAttempt(url, dest || '', auth, headers);
-        }), (err) => {
-            if (err instanceof HTTPError && err.httpStatusCode) {
-                // Don't retry anything less than 500, except 408 Request Timeout and 429 Too Many Requests
-                if (err.httpStatusCode < 500 &&
-                    err.httpStatusCode !== 408 &&
-                    err.httpStatusCode !== 429) {
-                    return false;
-                }
-            }
-            // Otherwise retry
-            return true;
-        });
-    });
-}
-exports.downloadTool = downloadTool;
-function downloadToolAttempt(url, dest, auth, headers) {
-    return __awaiter(this, void 0, void 0, function* () {
-        if (fs.existsSync(dest)) {
-            throw new Error(`Destination file path ${dest} already exists`);
-        }
-        // Get the response headers
-        const http = new httpm.HttpClient(userAgent, [], {
-            allowRetries: false
-        });
-        if (auth) {
-            core.debug('set auth');
-            if (headers === undefined) {
-                headers = {};
-            }
-            headers.authorization = auth;
-        }
-        const response = yield http.get(url, headers);
-        if (response.message.statusCode !== 200) {
-            const err = new HTTPError(response.message.statusCode);
-            core.debug(`Failed to download from "${url}". Code(${response.message.statusCode}) Message(${response.message.statusMessage})`);
-            throw err;
-        }
-        // Download the response body
-        const pipeline = util.promisify(stream.pipeline);
-        const responseMessageFactory = _getGlobal('TEST_DOWNLOAD_TOOL_RESPONSE_MESSAGE_FACTORY', () => response.message);
-        const readStream = responseMessageFactory();
-        let succeeded = false;
-        try {
-            yield pipeline(readStream, fs.createWriteStream(dest));
-            core.debug('download complete');
-            succeeded = true;
-            return dest;
-        }
-        finally {
-            // Error, delete dest before retry
-            if (!succeeded) {
-                core.debug('download failed');
-                try {
-                    yield io.rmRF(dest);
-                }
-                catch (err) {
-                    core.debug(`Failed to delete '${dest}'. ${err.message}`);
-                }
-            }
-        }
-    });
-}
-/**
- * Extract a .7z file
- *
- * @param file     path to the .7z file
- * @param dest     destination directory. Optional.
- * @param _7zPath  path to 7zr.exe. Optional, for long path support. Most .7z archives do not have this
- * problem. If your .7z archive contains very long paths, you can pass the path to 7zr.exe which will
- * gracefully handle long paths. By default 7zdec.exe is used because it is a very small program and is
- * bundled with the tool lib. However it does not support long paths. 7zr.exe is the reduced command line
- * interface, it is smaller than the full command line interface, and it does support long paths. At the
- * time of this writing, it is freely available from the LZMA SDK that is available on the 7zip website.
- * Be sure to check the current license agreement. If 7zr.exe is bundled with your action, then the path
- * to 7zr.exe can be pass to this function.
- * @returns        path to the destination directory
- */
-function extract7z(file, dest, _7zPath) {
-    return __awaiter(this, void 0, void 0, function* () {
-        (0, assert_1.ok)(IS_WINDOWS, 'extract7z() not supported on current OS');
-        (0, assert_1.ok)(file, 'parameter "file" is required');
-        dest = yield _createExtractFolder(dest);
-        const originalCwd = process.cwd();
-        process.chdir(dest);
-        if (_7zPath) {
-            try {
-                const logLevel = core.isDebug() ? '-bb1' : '-bb0';
-                const args = [
-                    'x',
-                    logLevel,
-                    '-bd',
-                    '-sccUTF-8',
-                    file
-                ];
-                const options = {
-                    silent: true
-                };
-                yield (0, exec_1.exec)(`"${_7zPath}"`, args, options);
-            }
-            finally {
-                process.chdir(originalCwd);
-            }
-        }
-        else {
-            const escapedScript = path
-                .join(__dirname, '..', 'scripts', 'Invoke-7zdec.ps1')
-                .replace(/'/g, "''")
-                .replace(/"|\n|\r/g, ''); // double-up single quotes, remove double quotes and newlines
-            const escapedFile = file.replace(/'/g, "''").replace(/"|\n|\r/g, '');
-            const escapedTarget = dest.replace(/'/g, "''").replace(/"|\n|\r/g, '');
-            const command = `& '${escapedScript}' -Source '${escapedFile}' -Target '${escapedTarget}'`;
-            const args = [
-                '-NoLogo',
-                '-Sta',
-                '-NoProfile',
-                '-NonInteractive',
-                '-ExecutionPolicy',
-                'Unrestricted',
-                '-Command',
-                command
-            ];
-            const options = {
-                silent: true
-            };
-            try {
-                const powershellPath = yield io.which('powershell', true);
-                yield (0, exec_1.exec)(`"${powershellPath}"`, args, options);
-            }
-            finally {
-                process.chdir(originalCwd);
-            }
-        }
-        return dest;
-    });
-}
-exports.extract7z = extract7z;
-/**
- * Extract a compressed tar archive
- *
- * @param file     path to the tar
- * @param dest     destination directory. Optional.
- * @param flags    flags for the tar command to use for extraction. Defaults to 'xz' (extracting gzipped tars). Optional.
- * @returns        path to the destination directory
- */
-function extractTar(file, dest, flags = 'xz') {
-    return __awaiter(this, void 0, void 0, function* () {
-        if (!file) {
-            throw new Error("parameter 'file' is required");
-        }
-        // Create dest
-        dest = yield _createExtractFolder(dest);
-        // Determine whether GNU tar
-        core.debug('Checking tar --version');
-        let versionOutput = '';
-        yield (0, exec_1.exec)('tar --version', [], {
-            ignoreReturnCode: true,
-            silent: true,
-            listeners: {
-                stdout: (data) => (versionOutput += data.toString()),
-                stderr: (data) => (versionOutput += data.toString())
-            }
-        });
-        core.debug(versionOutput.trim());
-        const isGnuTar = versionOutput.toUpperCase().includes('GNU TAR');
-        // Initialize args
-        let args;
-        if (flags instanceof Array) {
-            args = flags;
-        }
-        else {
-            args = [flags];
-        }
-        if (core.isDebug() && !flags.includes('v')) {
-            args.push('-v');
-        }
-        let destArg = dest;
-        let fileArg = file;
-        if (IS_WINDOWS && isGnuTar) {
-            args.push('--force-local');
-            destArg = dest.replace(/\\/g, '/');
-            // Technically only the dest needs to have `/` but for aesthetic consistency
-            // convert slashes in the file arg too.
-            fileArg = file.replace(/\\/g, '/');
-        }
-        if (isGnuTar) {
-            // Suppress warnings when using GNU tar to extract archives created by BSD tar
-            args.push('--warning=no-unknown-keyword');
-            args.push('--overwrite');
-        }
-        args.push('-C', destArg, '-f', fileArg);
-        yield (0, exec_1.exec)(`tar`, args);
-        return dest;
-    });
-}
-exports.extractTar = extractTar;
-/**
- * Extract a xar compatible archive
- *
- * @param file     path to the archive
- * @param dest     destination directory. Optional.
- * @param flags    flags for the xar. Optional.
- * @returns        path to the destination directory
- */
-function extractXar(file, dest, flags = []) {
-    return __awaiter(this, void 0, void 0, function* () {
-        (0, assert_1.ok)(IS_MAC, 'extractXar() not supported on current OS');
-        (0, assert_1.ok)(file, 'parameter "file" is required');
-        dest = yield _createExtractFolder(dest);
-        let args;
-        if (flags instanceof Array) {
-            args = flags;
-        }
-        else {
-            args = [flags];
-        }
-        args.push('-x', '-C', dest, '-f', file);
-        if (core.isDebug()) {
-            args.push('-v');
-        }
-        const xarPath = yield io.which('xar', true);
-        yield (0, exec_1.exec)(`"${xarPath}"`, _unique(args));
-        return dest;
-    });
-}
-exports.extractXar = extractXar;
-/**
- * Extract a zip
- *
- * @param file     path to the zip
- * @param dest     destination directory. Optional.
- * @returns        path to the destination directory
- */
-function extractZip(file, dest) {
-    return __awaiter(this, void 0, void 0, function* () {
-        if (!file) {
-            throw new Error("parameter 'file' is required");
-        }
-        dest = yield _createExtractFolder(dest);
-        if (IS_WINDOWS) {
-            yield extractZipWin(file, dest);
-        }
-        else {
-            yield extractZipNix(file, dest);
-        }
-        return dest;
-    });
-}
-exports.extractZip = extractZip;
-function extractZipWin(file, dest) {
-    return __awaiter(this, void 0, void 0, function* () {
-        // build the powershell command
-        const escapedFile = file.replace(/'/g, "''").replace(/"|\n|\r/g, ''); // double-up single quotes, remove double quotes and newlines
-        const escapedDest = dest.replace(/'/g, "''").replace(/"|\n|\r/g, '');
-        const pwshPath = yield io.which('pwsh', false);
-        //To match the file overwrite behavior on nix systems, we use the overwrite = true flag for ExtractToDirectory
-        //and the -Force flag for Expand-Archive as a fallback
-        if (pwshPath) {
-            //attempt to use pwsh with ExtractToDirectory, if this fails attempt Expand-Archive
-            const pwshCommand = [
-                `$ErrorActionPreference = 'Stop' ;`,
-                `try { Add-Type -AssemblyName System.IO.Compression.ZipFile } catch { } ;`,
-                `try { [System.IO.Compression.ZipFile]::ExtractToDirectory('${escapedFile}', '${escapedDest}', $true) }`,
-                `catch { if (($_.Exception.GetType().FullName -eq 'System.Management.Automation.MethodException') -or ($_.Exception.GetType().FullName -eq 'System.Management.Automation.RuntimeException') ){ Expand-Archive -LiteralPath '${escapedFile}' -DestinationPath '${escapedDest}' -Force } else { throw $_ } } ;`
-            ].join(' ');
-            const args = [
-                '-NoLogo',
-                '-NoProfile',
-                '-NonInteractive',
-                '-ExecutionPolicy',
-                'Unrestricted',
-                '-Command',
-                pwshCommand
-            ];
-            core.debug(`Using pwsh at path: ${pwshPath}`);
-            yield (0, exec_1.exec)(`"${pwshPath}"`, args);
-        }
-        else {
-            const powershellCommand = [
-                `$ErrorActionPreference = 'Stop' ;`,
-                `try { Add-Type -AssemblyName System.IO.Compression.FileSystem } catch { } ;`,
-                `if ((Get-Command -Name Expand-Archive -Module Microsoft.PowerShell.Archive -ErrorAction Ignore)) { Expand-Archive -LiteralPath '${escapedFile}' -DestinationPath '${escapedDest}' -Force }`,
-                `else {[System.IO.Compression.ZipFile]::ExtractToDirectory('${escapedFile}', '${escapedDest}', $true) }`
-            ].join(' ');
-            const args = [
-                '-NoLogo',
-                '-Sta',
-                '-NoProfile',
-                '-NonInteractive',
-                '-ExecutionPolicy',
-                'Unrestricted',
-                '-Command',
-                powershellCommand
-            ];
-            const powershellPath = yield io.which('powershell', true);
-            core.debug(`Using powershell at path: ${powershellPath}`);
-            yield (0, exec_1.exec)(`"${powershellPath}"`, args);
-        }
-    });
-}
-function extractZipNix(file, dest) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const unzipPath = yield io.which('unzip', true);
-        const args = [file];
-        if (!core.isDebug()) {
-            args.unshift('-q');
-        }
-        args.unshift('-o'); //overwrite with -o, otherwise a prompt is shown which freezes the run
-        yield (0, exec_1.exec)(`"${unzipPath}"`, args, { cwd: dest });
-    });
-}
-/**
- * Caches a directory and installs it into the tool cacheDir
- *
- * @param sourceDir    the directory to cache into tools
- * @param tool          tool name
- * @param version       version of the tool.  semver format
- * @param arch          architecture of the tool.  Optional.  Defaults to machine architecture
- */
-function cacheDir(sourceDir, tool, version, arch) {
-    return __awaiter(this, void 0, void 0, function* () {
-        version = semver.clean(version) || version;
-        arch = arch || os.arch();
-        core.debug(`Caching tool ${tool} ${version} ${arch}`);
-        core.debug(`source dir: ${sourceDir}`);
-        if (!fs.statSync(sourceDir).isDirectory()) {
-            throw new Error('sourceDir is not a directory');
-        }
-        // Create the tool dir
-        const destPath = yield _createToolPath(tool, version, arch);
-        // copy each child item. do not move. move can fail on Windows
-        // due to anti-virus software having an open handle on a file.
-        for (const itemName of fs.readdirSync(sourceDir)) {
-            const s = path.join(sourceDir, itemName);
-            yield io.cp(s, destPath, { recursive: true });
-        }
-        // write .complete
-        _completeToolPath(tool, version, arch);
-        return destPath;
-    });
-}
-exports.cacheDir = cacheDir;
-/**
- * Caches a downloaded file (GUID) and installs it
- * into the tool cache with a given targetName
- *
- * @param sourceFile    the file to cache into tools.  Typically a result of downloadTool which is a guid.
- * @param targetFile    the name of the file name in the tools directory
- * @param tool          tool name
- * @param version       version of the tool.  semver format
- * @param arch          architecture of the tool.  Optional.  Defaults to machine architecture
- */
-function cacheFile(sourceFile, targetFile, tool, version, arch) {
-    return __awaiter(this, void 0, void 0, function* () {
-        version = semver.clean(version) || version;
-        arch = arch || os.arch();
-        core.debug(`Caching tool ${tool} ${version} ${arch}`);
-        core.debug(`source file: ${sourceFile}`);
-        if (!fs.statSync(sourceFile).isFile()) {
-            throw new Error('sourceFile is not a file');
-        }
-        // create the tool dir
-        const destFolder = yield _createToolPath(tool, version, arch);
-        // copy instead of move. move can fail on Windows due to
-        // anti-virus software having an open handle on a file.
-        const destPath = path.join(destFolder, targetFile);
-        core.debug(`destination file ${destPath}`);
-        yield io.cp(sourceFile, destPath);
-        // write .complete
-        _completeToolPath(tool, version, arch);
-        return destFolder;
-    });
-}
-exports.cacheFile = cacheFile;
-/**
- * Finds the path to a tool version in the local installed tool cache
- *
- * @param toolName      name of the tool
- * @param versionSpec   version of the tool
- * @param arch          optional arch.  defaults to arch of computer
- */
-function find(toolName, versionSpec, arch) {
-    if (!toolName) {
-        throw new Error('toolName parameter is required');
-    }
-    if (!versionSpec) {
-        throw new Error('versionSpec parameter is required');
-    }
-    arch = arch || os.arch();
-    // attempt to resolve an explicit version
-    if (!isExplicitVersion(versionSpec)) {
-        const localVersions = findAllVersions(toolName, arch);
-        const match = evaluateVersions(localVersions, versionSpec);
-        versionSpec = match;
-    }
-    // check for the explicit version in the cache
-    let toolPath = '';
-    if (versionSpec) {
-        versionSpec = semver.clean(versionSpec) || '';
-        const cachePath = path.join(_getCacheDirectory(), toolName, versionSpec, arch);
-        core.debug(`checking cache: ${cachePath}`);
-        if (fs.existsSync(cachePath) && fs.existsSync(`${cachePath}.complete`)) {
-            core.debug(`Found tool in cache ${toolName} ${versionSpec} ${arch}`);
-            toolPath = cachePath;
-        }
-        else {
-            core.debug('not found');
-        }
-    }
-    return toolPath;
-}
-exports.find = find;
-/**
- * Finds the paths to all versions of a tool that are installed in the local tool cache
- *
- * @param toolName  name of the tool
- * @param arch      optional arch.  defaults to arch of computer
- */
-function findAllVersions(toolName, arch) {
-    const versions = [];
-    arch = arch || os.arch();
-    const toolPath = path.join(_getCacheDirectory(), toolName);
-    if (fs.existsSync(toolPath)) {
-        const children = fs.readdirSync(toolPath);
-        for (const child of children) {
-            if (isExplicitVersion(child)) {
-                const fullPath = path.join(toolPath, child, arch || '');
-                if (fs.existsSync(fullPath) && fs.existsSync(`${fullPath}.complete`)) {
-                    versions.push(child);
-                }
-            }
-        }
-    }
-    return versions;
-}
-exports.findAllVersions = findAllVersions;
-function getManifestFromRepo(owner, repo, auth, branch = 'master') {
-    return __awaiter(this, void 0, void 0, function* () {
-        let releases = [];
-        const treeUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}`;
-        const http = new httpm.HttpClient('tool-cache');
-        const headers = {};
-        if (auth) {
-            core.debug('set auth');
-            headers.authorization = auth;
-        }
-        const response = yield http.getJson(treeUrl, headers);
-        if (!response.result) {
-            return releases;
-        }
-        let manifestUrl = '';
-        for (const item of response.result.tree) {
-            if (item.path === 'versions-manifest.json') {
-                manifestUrl = item.url;
-                break;
-            }
-        }
-        headers['accept'] = 'application/vnd.github.VERSION.raw';
-        let versionsRaw = yield (yield http.get(manifestUrl, headers)).readBody();
-        if (versionsRaw) {
-            // shouldn't be needed but protects against invalid json saved with BOM
-            versionsRaw = versionsRaw.replace(/^\uFEFF/, '');
-            try {
-                releases = JSON.parse(versionsRaw);
-            }
-            catch (_a) {
-                core.debug('Invalid json');
-            }
-        }
-        return releases;
-    });
-}
-exports.getManifestFromRepo = getManifestFromRepo;
-function findFromManifest(versionSpec, stable, manifest, archFilter = os.arch()) {
-    return __awaiter(this, void 0, void 0, function* () {
-        // wrap the internal impl
-        const match = yield mm._findMatch(versionSpec, stable, manifest, archFilter);
-        return match;
-    });
-}
-exports.findFromManifest = findFromManifest;
-function _createExtractFolder(dest) {
-    return __awaiter(this, void 0, void 0, function* () {
-        if (!dest) {
-            // create a temp dir
-            dest = path.join(_getTempDirectory(), crypto.randomUUID());
-        }
-        yield io.mkdirP(dest);
-        return dest;
-    });
-}
-function _createToolPath(tool, version, arch) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const folderPath = path.join(_getCacheDirectory(), tool, semver.clean(version) || version, arch || '');
-        core.debug(`destination ${folderPath}`);
-        const markerPath = `${folderPath}.complete`;
-        yield io.rmRF(folderPath);
-        yield io.rmRF(markerPath);
-        yield io.mkdirP(folderPath);
-        return folderPath;
-    });
-}
-function _completeToolPath(tool, version, arch) {
-    const folderPath = path.join(_getCacheDirectory(), tool, semver.clean(version) || version, arch || '');
-    const markerPath = `${folderPath}.complete`;
-    fs.writeFileSync(markerPath, '');
-    core.debug('finished caching tool');
-}
-/**
- * Check if version string is explicit
- *
- * @param versionSpec      version string to check
- */
-function isExplicitVersion(versionSpec) {
-    const c = semver.clean(versionSpec) || '';
-    core.debug(`isExplicit: ${c}`);
-    const valid = semver.valid(c) != null;
-    core.debug(`explicit? ${valid}`);
-    return valid;
-}
-exports.isExplicitVersion = isExplicitVersion;
-/**
- * Get the highest satisfiying semantic version in `versions` which satisfies `versionSpec`
- *
- * @param versions        array of versions to evaluate
- * @param versionSpec     semantic version spec to satisfy
- */
-function evaluateVersions(versions, versionSpec) {
-    let version = '';
-    core.debug(`evaluating ${versions.length} versions`);
-    versions = versions.sort((a, b) => {
-        if (semver.gt(a, b)) {
-            return 1;
-        }
-        return -1;
-    });
-    for (let i = versions.length - 1; i >= 0; i--) {
-        const potential = versions[i];
-        const satisfied = semver.satisfies(potential, versionSpec);
-        if (satisfied) {
-            version = potential;
-            break;
-        }
-    }
-    if (version) {
-        core.debug(`matched: ${version}`);
-    }
-    else {
-        core.debug('match not found');
-    }
-    return version;
-}
-exports.evaluateVersions = evaluateVersions;
-/**
- * Gets RUNNER_TOOL_CACHE
- */
-function _getCacheDirectory() {
-    const cacheDirectory = process.env['RUNNER_TOOL_CACHE'] || '';
-    (0, assert_1.ok)(cacheDirectory, 'Expected RUNNER_TOOL_CACHE to be defined');
-    return cacheDirectory;
-}
-/**
- * Gets RUNNER_TEMP
- */
-function _getTempDirectory() {
-    const tempDirectory = process.env['RUNNER_TEMP'] || '';
-    (0, assert_1.ok)(tempDirectory, 'Expected RUNNER_TEMP to be defined');
-    return tempDirectory;
-}
-/**
- * Gets a global variable
- */
-function _getGlobal(key, defaultValue) {
-    /* eslint-disable @typescript-eslint/no-explicit-any */
-    const value = global[key];
-    /* eslint-enable @typescript-eslint/no-explicit-any */
-    return value !== undefined ? value : defaultValue;
-}
-/**
- * Returns an array of unique values.
- * @param values Values to make unique.
- */
-function _unique(values) {
-    return Array.from(new Set(values));
-}
-//# sourceMappingURL=tool-cache.js.map
 
 /***/ }),
 
@@ -45327,223 +44450,297 @@ function wrappy (fn, cb) {
 
 /***/ }),
 
-/***/ 42351:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+/***/ 97377:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
-const core = __nccwpck_require__(37484);
-const cache = __nccwpck_require__(5116);
-const github = __nccwpck_require__(93228);
-const fs = __nccwpck_require__(79896);
-const os = __nccwpck_require__(70857);
-const path = __nccwpck_require__(16928);
-const { State } = __nccwpck_require__(19992);
+"use strict";
 
-// Define constants for cache paths and prefix
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.restoreCache = restoreCache;
+exports.saveCache = saveCache;
+const core = __importStar(__nccwpck_require__(37484));
+const cache = __importStar(__nccwpck_require__(5116));
+const github = __importStar(__nccwpck_require__(93228));
+const fs = __importStar(__nccwpck_require__(79896));
+const os = __importStar(__nccwpck_require__(70857));
+const path = __importStar(__nccwpck_require__(16928));
+// Define constants for cache paths and prefix.
 const HOME = os.homedir();
 const PLATFORM = os.platform();
-const CACHE_PATHS = [path.join(HOME, ".foundry/cache/rpc")];
+const CACHE_PATHS = [path.join(HOME, ".foundry/cache")];
 const CACHE_PREFIX = `${PLATFORM}-foundry-chain-fork-`;
-
+const STATE_CACHE_PRIMARY_KEY = "CACHE_KEY";
+const STATE_CACHE_MATCHED_KEY = "CACHE_RESULT";
 /**
  * Constructs the primary key for the cache using a custom key input.
- * @param {string} customKeyInput - The custom part of the key provided by the user.
- * @returns {string} The complete primary key for the cache.
+ * @param customKeyInput - The custom part of the key provided by the user.
+ * @returns The complete primary key for the cache.
  */
 function getPrimaryKey(customKeyInput) {
-  if (!customKeyInput) {
-    return `${CACHE_PREFIX}${github.context.sha}`;
-  }
-  return `${CACHE_PREFIX}${customKeyInput.trim()}`;
+    if (!customKeyInput) {
+        return `${CACHE_PREFIX}${github.context.sha}`;
+    }
+    return `${CACHE_PREFIX}${customKeyInput.trim()}`;
 }
-
 /**
  * Constructs an array of restore keys based on user input and a default prefix.
- * @param {string} customRestoreKeysInput - Newline-separated string of custom restore keys.
- * @returns {string[]} An array of restore keys for the cache.
+ * @param customRestoreKeysInput - Newline-separated string of custom restore keys.
+ * @returns An array of restore keys for the cache.
  */
 function getRestoreKeys(customRestoreKeysInput) {
-  const defaultRestoreKeys = [CACHE_PREFIX];
-  if (!customRestoreKeysInput) {
-    return defaultRestoreKeys;
-  }
-  const restoreKeys = customRestoreKeysInput
-    .split(/[\r\n]/)
-    .map((input) => input.trim())
-    .filter((input) => input !== "")
-    .map((input) => `${CACHE_PREFIX}${input}`);
-  return restoreKeys;
+    const defaultRestoreKeys = [CACHE_PREFIX];
+    if (!customRestoreKeysInput) {
+        return defaultRestoreKeys;
+    }
+    const restoreKeys = customRestoreKeysInput
+        .split(/[\r\n]/)
+        .map((input) => input.trim())
+        .filter((input) => input !== "")
+        .map((input) => `${CACHE_PREFIX}${input}`);
+    return restoreKeys;
 }
-
-/**
- * Restores the RPC cache using the provided keys.
- */
-async function restoreRPCCache() {
-  const customKeyInput = core.getInput("cache-key");
-  const primaryKey = getPrimaryKey(customKeyInput);
-  core.info(`Primary key: ${primaryKey}`);
-  core.saveState(State.CachePrimaryKey, primaryKey);
-
-  const customRestoreKeysInput = core.getInput("cache-restore-keys");
-  const restoreKeys = getRestoreKeys(customRestoreKeysInput);
-  core.info(`Restore keys: ${restoreKeys.join(", ")}`);
-  const matchedKey = await cache.restoreCache(CACHE_PATHS, primaryKey, restoreKeys);
-
-  if (!matchedKey) {
-    core.info("Cache not found");
-    return;
-  }
-
-  core.saveState(State.CacheMatchedKey, matchedKey);
-  core.info(`Cache restored from key: ${matchedKey}`);
+/** Restores the cache using the provided keys. */
+async function restoreCache() {
+    const customKeyInput = core.getInput("cache-key");
+    const primaryKey = getPrimaryKey(customKeyInput);
+    core.info(`Primary key: ${primaryKey}`);
+    core.saveState(STATE_CACHE_PRIMARY_KEY, primaryKey);
+    const customRestoreKeysInput = core.getInput("cache-restore-keys");
+    const restoreKeys = getRestoreKeys(customRestoreKeysInput);
+    core.info(`Restore keys: ${restoreKeys.join(", ")}`);
+    const matchedKey = await cache.restoreCache(CACHE_PATHS, primaryKey, restoreKeys);
+    if (!matchedKey) {
+        core.info("Cache not found");
+        return;
+    }
+    core.saveState(STATE_CACHE_MATCHED_KEY, matchedKey);
+    core.info(`Cache restored from key: ${matchedKey}`);
 }
-
 /**
- * Saves the RPC cache using the primary key saved in the state.
+ * Saves the cache using the primary key saved in the state.
  * If the cache was already saved with the primary key, it will not save it again.
  */
 async function saveCache() {
-  const primaryKey = core.getState(State.CachePrimaryKey);
-  const matchedKey = core.getState(State.CacheMatchedKey);
-
-  // If the cache path does not exist, do not save the cache
-  if (!fs.existsSync(CACHE_PATHS[0])) {
-    core.info(`Cache path does not exist, not saving cache: ${CACHE_PATHS[0]}`);
-    return;
-  }
-
-  // If the primary key is not generated, do not save the cache
-  if (!primaryKey) {
-    core.info("Primary key was not generated. Please check the log messages above for more errors or information");
-    return;
-  }
-
-  // If the primary key and the matched key are the same, this means the cache was already saved
-  if (primaryKey === matchedKey) {
-    core.info(`Cache hit occurred on the primary key ${primaryKey}, not saving cache.`);
-    return;
-  }
-
-  const cacheId = await cache.saveCache(CACHE_PATHS, primaryKey);
-
-  // If the cacheId is -1, the saving failed with an error message log. No additional logging is needed.
-  if (cacheId === -1) {
-    return;
-  }
-
-  core.info(`Cache saved with the key: ${primaryKey}`);
+    const primaryKey = core.getState(STATE_CACHE_PRIMARY_KEY);
+    const matchedKey = core.getState(STATE_CACHE_MATCHED_KEY);
+    // If the cache path does not exist, do not save the cache.
+    if (!fs.existsSync(CACHE_PATHS[0])) {
+        core.info(`Cache path does not exist, not saving cache: ${CACHE_PATHS[0]}`);
+        return;
+    }
+    // If the primary key is not generated, do not save the cache.
+    if (!primaryKey) {
+        core.info("Primary key was not generated. Please check the log messages above for more errors or information");
+        return;
+    }
+    // If the primary key and the matched key are the same, this means the cache was already saved.
+    if (primaryKey === matchedKey) {
+        core.info(`Cache hit occurred on the primary key ${primaryKey}, not saving cache.`);
+        return;
+    }
+    const cacheId = await cache.saveCache(CACHE_PATHS, primaryKey);
+    // If the cacheId is -1, the saving failed with an error message log. No additional logging is needed.
+    if (cacheId === -1) {
+        return;
+    }
+    core.info(`Cache saved with the key: ${primaryKey}`);
 }
-
-module.exports = {
-  restoreRPCCache,
-  saveCache,
-};
 
 
 /***/ }),
 
-/***/ 19992:
-/***/ ((__unused_webpack_module, __webpack_exports__, __nccwpck_require__) => {
+/***/ 79407:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
 "use strict";
-__nccwpck_require__.r(__webpack_exports__);
-/* harmony export */ __nccwpck_require__.d(__webpack_exports__, {
-/* harmony export */   State: () => (/* binding */ State)
-/* harmony export */ });
-// Enum for the cache primary key and result key.
-const State = {
-  CachePrimaryKey: "CACHE_KEY",
-  CacheMatchedKey: "CACHE_RESULT",
-};
 
-
-/***/ }),
-
-/***/ 5105:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-const core = __nccwpck_require__(37484);
-const toolCache = __nccwpck_require__(33472);
-const path = __nccwpck_require__(16928);
-
-const { restoreRPCCache } = __nccwpck_require__(42351);
-const { getDownloadObject } = __nccwpck_require__(95804);
-
-async function main() {
-  try {
-    // Get version input
-    const version = core.getInput("version");
-
-    // Download the archive containing the binaries
-    const download = getDownloadObject(version);
-    core.info(`Downloading Foundry '${version}' from: ${download.url}`);
-    const pathToArchive = await toolCache.downloadTool(download.url);
-
-    // Extract the archive onto host runner
-    core.debug(`Extracting ${pathToArchive}`);
-    const extract = download.url.endsWith(".zip") ? toolCache.extractZip : toolCache.extractTar;
-    const pathToCLI = await extract(pathToArchive);
-
-    // Expose the tool
-    core.addPath(path.join(pathToCLI, download.binPath));
-
-    // Get cache input
-    const cache = core.getBooleanInput("cache");
-
-    // If cache input is false, skip restoring cache
-    if (!cache) {
-      core.info("Cache not requested, not restoring cache");
-      return;
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
     }
-
-    // Restore the RPC cache
-    await restoreRPCCache();
-  } catch (err) {
-    core.setFailed(err);
-  }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+const core = __importStar(__nccwpck_require__(37484));
+const child_process_1 = __nccwpck_require__(35317);
+const fs = __importStar(__nccwpck_require__(79896));
+const https = __importStar(__nccwpck_require__(65692));
+const os = __importStar(__nccwpck_require__(70857));
+const path = __importStar(__nccwpck_require__(16928));
+const cache_js_1 = __nccwpck_require__(97377);
+const FOUNDRYUP_INSTALLER_URL = "https://raw.githubusercontent.com/foundry-rs/foundry/HEAD/foundryup/install";
+const FOUNDRY_DIR = path.join(os.homedir(), ".foundry");
+const FOUNDRY_BIN = path.join(FOUNDRY_DIR, "bin");
+const FOUNDRY_TOOLS = ["forge", "cast", "anvil", "chisel"];
+function downloadOnce(url, dest) {
+    return new Promise((resolve, reject) => {
+        const file = fs.createWriteStream(dest);
+        const handleResponse = (res) => {
+            if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                https.get(res.headers.location, handleResponse).on("error", reject);
+                return;
+            }
+            if (res.statusCode !== 200) {
+                reject(new Error(`HTTP ${res.statusCode}`));
+                return;
+            }
+            res.pipe(file);
+            file.on("finish", () => {
+                file.close();
+                fs.chmodSync(dest, 0o755);
+                resolve();
+            });
+        };
+        https.get(url, handleResponse).on("error", reject);
+    });
 }
-
-module.exports = main;
-
-if (require.main === require.cache[eval('__filename')]) {
-  main();
+async function download(url, dest, retries = 3) {
+    for (let i = 0; i < retries; i++) {
+        try {
+            return await downloadOnce(url, dest);
+        }
+        catch (err) {
+            if (i === retries - 1)
+                throw err;
+            const message = err instanceof Error ? err.message : String(err);
+            core.warning(`Download failed (attempt ${i + 1}/${retries}): ${message}`);
+            await new Promise((r) => setTimeout(r, 1000 * (i + 1)));
+        }
+    }
 }
-
-
-/***/ }),
-
-/***/ 95804:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-const os = __nccwpck_require__(70857);
-
-function normalizeVersionName(version) {
-  return version.replace(/^nightly-[0-9a-f]{40}$/, "nightly");
+function buildFoundryupArgs() {
+    const args = [];
+    let version = core.getInput("version");
+    const network = core.getInput("network");
+    // Strip 'v' prefix from version if present (e.g., "v1.3.6" -> "1.3.6").
+    if (version && version.startsWith("v")) {
+        version = version.slice(1);
+    }
+    if (version && version !== "stable")
+        args.push("--install", version);
+    if (network && network !== "ethereum")
+        args.push("--network", network);
+    return args;
 }
-
-function mapArch(arch) {
-  const mappings = {
-    x32: "386",
-    x64: "amd64",
-  };
-
-  return mappings[arch] || arch;
+function run(cmd, ignoreShellError = false) {
+    try {
+        (0, child_process_1.execSync)(cmd, { stdio: "pipe", env: { ...process.env, FOUNDRY_DIR } });
+    }
+    catch (err) {
+        const execErr = err;
+        const output = [execErr.stdout, execErr.stderr, execErr.message].map((b) => b?.toString() || "").join("\n");
+        if (ignoreShellError && output.includes("could not detect shell")) {
+            core.debug("Shell detection failed (expected in CI), continuing...");
+            return;
+        }
+        // Log captured output before throwing.
+        if (execErr.stdout)
+            core.info(execErr.stdout.toString());
+        if (execErr.stderr)
+            core.error(execErr.stderr.toString());
+        throw err;
+    }
 }
-
-function getDownloadObject(version) {
-  const platform = os.platform();
-  const filename = `foundry_${normalizeVersionName(version)}_${platform}_${mapArch(os.arch())}`;
-  const extension = platform === "win32" ? "zip" : "tar.gz";
-  const url = `https://github.com/foundry-rs/foundry/releases/download/${version}/${filename}.${extension}`;
-
-  return {
-    url,
-    binPath: ".",
-  };
+async function main() {
+    try {
+        const version = core.getInput("version") || "stable";
+        const network = core.getInput("network") || "ethereum";
+        core.info(`Installing Foundry (version: ${version}, network: ${network})`);
+        // Download and run the installer.
+        const installer = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "foundryup-")), "install");
+        core.info("Downloading foundryup installer...");
+        await download(FOUNDRYUP_INSTALLER_URL, installer);
+        core.info("Running foundryup installer...");
+        run(`bash "${installer}"`, true);
+        // Run foundryup to install binaries (use bash since foundryup is a shell script).
+        const foundryup = path.join(FOUNDRY_BIN, "foundryup");
+        const args = buildFoundryupArgs();
+        core.info(`Running: foundryup ${args.join(" ")}`);
+        run(`bash "${foundryup}" ${args.join(" ")}`);
+        core.addPath(FOUNDRY_BIN);
+        core.info(`Added ${FOUNDRY_BIN} to PATH`);
+        // Restore cache.
+        if (core.getBooleanInput("cache")) {
+            await (0, cache_js_1.restoreCache)();
+        }
+        else {
+            core.info("Cache not requested, not restoring cache");
+        }
+        // Print installed versions.
+        for (const bin of FOUNDRY_TOOLS) {
+            try {
+                core.info(`Running: ${bin} --version`);
+                (0, child_process_1.execSync)(`${bin} --version`, { stdio: "inherit" });
+            }
+            catch { }
+        }
+    }
+    catch (err) {
+        core.setFailed(err instanceof Error ? err : String(err));
+    }
 }
-
-module.exports = {
-  getDownloadObject,
-};
+exports["default"] = main;
+main();
 
 
 /***/ }),
@@ -88423,7 +87620,7 @@ function randomUUID() {
 /***/ 50591:
 /***/ ((module) => {
 
-(()=>{"use strict";var t={d:(e,n)=>{for(var i in n)t.o(n,i)&&!t.o(e,i)&&Object.defineProperty(e,i,{enumerable:!0,get:n[i]})},o:(t,e)=>Object.prototype.hasOwnProperty.call(t,e),r:t=>{"undefined"!=typeof Symbol&&Symbol.toStringTag&&Object.defineProperty(t,Symbol.toStringTag,{value:"Module"}),Object.defineProperty(t,"__esModule",{value:!0})}},e={};t.r(e),t.d(e,{XMLBuilder:()=>ft,XMLParser:()=>st,XMLValidator:()=>mt});const n=":A-Za-z_\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u02FF\\u0370-\\u037D\\u037F-\\u1FFF\\u200C-\\u200D\\u2070-\\u218F\\u2C00-\\u2FEF\\u3001-\\uD7FF\\uF900-\\uFDCF\\uFDF0-\\uFFFD",i=new RegExp("^["+n+"]["+n+"\\-.\\d\\u00B7\\u0300-\\u036F\\u203F-\\u2040]*$");function s(t,e){const n=[];let i=e.exec(t);for(;i;){const s=[];s.startIndex=e.lastIndex-i[0].length;const r=i.length;for(let t=0;t<r;t++)s.push(i[t]);n.push(s),i=e.exec(t)}return n}const r=function(t){return!(null==i.exec(t))},o={allowBooleanAttributes:!1,unpairedTags:[]};function a(t,e){e=Object.assign({},o,e);const n=[];let i=!1,s=!1;"\ufeff"===t[0]&&(t=t.substr(1));for(let o=0;o<t.length;o++)if("<"===t[o]&&"?"===t[o+1]){if(o+=2,o=u(t,o),o.err)return o}else{if("<"!==t[o]){if(l(t[o]))continue;return x("InvalidChar","char '"+t[o]+"' is not expected.",N(t,o))}{let a=o;if(o++,"!"===t[o]){o=h(t,o);continue}{let d=!1;"/"===t[o]&&(d=!0,o++);let f="";for(;o<t.length&&">"!==t[o]&&" "!==t[o]&&"\t"!==t[o]&&"\n"!==t[o]&&"\r"!==t[o];o++)f+=t[o];if(f=f.trim(),"/"===f[f.length-1]&&(f=f.substring(0,f.length-1),o--),!r(f)){let e;return e=0===f.trim().length?"Invalid space after '<'.":"Tag '"+f+"' is an invalid name.",x("InvalidTag",e,N(t,o))}const p=c(t,o);if(!1===p)return x("InvalidAttr","Attributes for '"+f+"' have open quote.",N(t,o));let b=p.value;if(o=p.index,"/"===b[b.length-1]){const n=o-b.length;b=b.substring(0,b.length-1);const s=g(b,e);if(!0!==s)return x(s.err.code,s.err.msg,N(t,n+s.err.line));i=!0}else if(d){if(!p.tagClosed)return x("InvalidTag","Closing tag '"+f+"' doesn't have proper closing.",N(t,o));if(b.trim().length>0)return x("InvalidTag","Closing tag '"+f+"' can't have attributes or invalid starting.",N(t,a));if(0===n.length)return x("InvalidTag","Closing tag '"+f+"' has not been opened.",N(t,a));{const e=n.pop();if(f!==e.tagName){let n=N(t,e.tagStartPos);return x("InvalidTag","Expected closing tag '"+e.tagName+"' (opened in line "+n.line+", col "+n.col+") instead of closing tag '"+f+"'.",N(t,a))}0==n.length&&(s=!0)}}else{const r=g(b,e);if(!0!==r)return x(r.err.code,r.err.msg,N(t,o-b.length+r.err.line));if(!0===s)return x("InvalidXml","Multiple possible root nodes found.",N(t,o));-1!==e.unpairedTags.indexOf(f)||n.push({tagName:f,tagStartPos:a}),i=!0}for(o++;o<t.length;o++)if("<"===t[o]){if("!"===t[o+1]){o++,o=h(t,o);continue}if("?"!==t[o+1])break;if(o=u(t,++o),o.err)return o}else if("&"===t[o]){const e=m(t,o);if(-1==e)return x("InvalidChar","char '&' is not expected.",N(t,o));o=e}else if(!0===s&&!l(t[o]))return x("InvalidXml","Extra text at the end",N(t,o));"<"===t[o]&&o--}}}return i?1==n.length?x("InvalidTag","Unclosed tag '"+n[0].tagName+"'.",N(t,n[0].tagStartPos)):!(n.length>0)||x("InvalidXml","Invalid '"+JSON.stringify(n.map((t=>t.tagName)),null,4).replace(/\r?\n/g,"")+"' found.",{line:1,col:1}):x("InvalidXml","Start tag expected.",1)}function l(t){return" "===t||"\t"===t||"\n"===t||"\r"===t}function u(t,e){const n=e;for(;e<t.length;e++)if("?"!=t[e]&&" "!=t[e]);else{const i=t.substr(n,e-n);if(e>5&&"xml"===i)return x("InvalidXml","XML declaration allowed only at the start of the document.",N(t,e));if("?"==t[e]&&">"==t[e+1]){e++;break}}return e}function h(t,e){if(t.length>e+5&&"-"===t[e+1]&&"-"===t[e+2]){for(e+=3;e<t.length;e++)if("-"===t[e]&&"-"===t[e+1]&&">"===t[e+2]){e+=2;break}}else if(t.length>e+8&&"D"===t[e+1]&&"O"===t[e+2]&&"C"===t[e+3]&&"T"===t[e+4]&&"Y"===t[e+5]&&"P"===t[e+6]&&"E"===t[e+7]){let n=1;for(e+=8;e<t.length;e++)if("<"===t[e])n++;else if(">"===t[e]&&(n--,0===n))break}else if(t.length>e+9&&"["===t[e+1]&&"C"===t[e+2]&&"D"===t[e+3]&&"A"===t[e+4]&&"T"===t[e+5]&&"A"===t[e+6]&&"["===t[e+7])for(e+=8;e<t.length;e++)if("]"===t[e]&&"]"===t[e+1]&&">"===t[e+2]){e+=2;break}return e}const d='"',f="'";function c(t,e){let n="",i="",s=!1;for(;e<t.length;e++){if(t[e]===d||t[e]===f)""===i?i=t[e]:i!==t[e]||(i="");else if(">"===t[e]&&""===i){s=!0;break}n+=t[e]}return""===i&&{value:n,index:e,tagClosed:s}}const p=new RegExp("(\\s*)([^\\s=]+)(\\s*=)?(\\s*(['\"])(([\\s\\S])*?)\\5)?","g");function g(t,e){const n=s(t,p),i={};for(let t=0;t<n.length;t++){if(0===n[t][1].length)return x("InvalidAttr","Attribute '"+n[t][2]+"' has no space in starting.",E(n[t]));if(void 0!==n[t][3]&&void 0===n[t][4])return x("InvalidAttr","Attribute '"+n[t][2]+"' is without value.",E(n[t]));if(void 0===n[t][3]&&!e.allowBooleanAttributes)return x("InvalidAttr","boolean attribute '"+n[t][2]+"' is not allowed.",E(n[t]));const s=n[t][2];if(!b(s))return x("InvalidAttr","Attribute '"+s+"' is an invalid name.",E(n[t]));if(i.hasOwnProperty(s))return x("InvalidAttr","Attribute '"+s+"' is repeated.",E(n[t]));i[s]=1}return!0}function m(t,e){if(";"===t[++e])return-1;if("#"===t[e])return function(t,e){let n=/\d/;for("x"===t[e]&&(e++,n=/[\da-fA-F]/);e<t.length;e++){if(";"===t[e])return e;if(!t[e].match(n))break}return-1}(t,++e);let n=0;for(;e<t.length;e++,n++)if(!(t[e].match(/\w/)&&n<20)){if(";"===t[e])break;return-1}return e}function x(t,e,n){return{err:{code:t,msg:e,line:n.line||n,col:n.col}}}function b(t){return r(t)}function N(t,e){const n=t.substring(0,e).split(/\r?\n/);return{line:n.length,col:n[n.length-1].length+1}}function E(t){return t.startIndex+t[1].length}const v={preserveOrder:!1,attributeNamePrefix:"@_",attributesGroupName:!1,textNodeName:"#text",ignoreAttributes:!0,removeNSPrefix:!1,allowBooleanAttributes:!1,parseTagValue:!0,parseAttributeValue:!1,trimValues:!0,cdataPropName:!1,numberParseOptions:{hex:!0,leadingZeros:!0,eNotation:!0},tagValueProcessor:function(t,e){return e},attributeValueProcessor:function(t,e){return e},stopNodes:[],alwaysCreateTextNode:!1,isArray:()=>!1,commentPropName:!1,unpairedTags:[],processEntities:!0,htmlEntities:!1,ignoreDeclaration:!1,ignorePiTags:!1,transformTagName:!1,transformAttributeName:!1,updateTag:function(t,e,n){return t},captureMetaData:!1};let y;y="function"!=typeof Symbol?"@@xmlMetadata":Symbol("XML Node Metadata");class T{constructor(t){this.tagname=t,this.child=[],this[":@"]={}}add(t,e){"__proto__"===t&&(t="#__proto__"),this.child.push({[t]:e})}addChild(t,e){"__proto__"===t.tagname&&(t.tagname="#__proto__"),t[":@"]&&Object.keys(t[":@"]).length>0?this.child.push({[t.tagname]:t.child,":@":t[":@"]}):this.child.push({[t.tagname]:t.child}),void 0!==e&&(this.child[this.child.length-1][y]={startIndex:e})}static getMetaDataSymbol(){return y}}function w(t,e){const n={};if("O"!==t[e+3]||"C"!==t[e+4]||"T"!==t[e+5]||"Y"!==t[e+6]||"P"!==t[e+7]||"E"!==t[e+8])throw new Error("Invalid Tag instead of DOCTYPE");{e+=9;let i=1,s=!1,r=!1,o="";for(;e<t.length;e++)if("<"!==t[e]||r)if(">"===t[e]){if(r?"-"===t[e-1]&&"-"===t[e-2]&&(r=!1,i--):i--,0===i)break}else"["===t[e]?s=!0:o+=t[e];else{if(s&&C(t,"!ENTITY",e)){let i,s;e+=7,[i,s,e]=O(t,e+1),-1===s.indexOf("&")&&(n[i]={regx:RegExp(`&${i};`,"g"),val:s})}else if(s&&C(t,"!ELEMENT",e)){e+=8;const{index:n}=S(t,e+1);e=n}else if(s&&C(t,"!ATTLIST",e))e+=8;else if(s&&C(t,"!NOTATION",e)){e+=9;const{index:n}=A(t,e+1);e=n}else{if(!C(t,"!--",e))throw new Error("Invalid DOCTYPE");r=!0}i++,o=""}if(0!==i)throw new Error("Unclosed DOCTYPE")}return{entities:n,i:e}}const P=(t,e)=>{for(;e<t.length&&/\s/.test(t[e]);)e++;return e};function O(t,e){e=P(t,e);let n="";for(;e<t.length&&!/\s/.test(t[e])&&'"'!==t[e]&&"'"!==t[e];)n+=t[e],e++;if($(n),e=P(t,e),"SYSTEM"===t.substring(e,e+6).toUpperCase())throw new Error("External entities are not supported");if("%"===t[e])throw new Error("Parameter entities are not supported");let i="";return[e,i]=I(t,e,"entity"),[n,i,--e]}function A(t,e){e=P(t,e);let n="";for(;e<t.length&&!/\s/.test(t[e]);)n+=t[e],e++;$(n),e=P(t,e);const i=t.substring(e,e+6).toUpperCase();if("SYSTEM"!==i&&"PUBLIC"!==i)throw new Error(`Expected SYSTEM or PUBLIC, found "${i}"`);e+=i.length,e=P(t,e);let s=null,r=null;if("PUBLIC"===i)[e,s]=I(t,e,"publicIdentifier"),'"'!==t[e=P(t,e)]&&"'"!==t[e]||([e,r]=I(t,e,"systemIdentifier"));else if("SYSTEM"===i&&([e,r]=I(t,e,"systemIdentifier"),!r))throw new Error("Missing mandatory system identifier for SYSTEM notation");return{notationName:n,publicIdentifier:s,systemIdentifier:r,index:--e}}function I(t,e,n){let i="";const s=t[e];if('"'!==s&&"'"!==s)throw new Error(`Expected quoted string, found "${s}"`);for(e++;e<t.length&&t[e]!==s;)i+=t[e],e++;if(t[e]!==s)throw new Error(`Unterminated ${n} value`);return[++e,i]}function S(t,e){e=P(t,e);let n="";for(;e<t.length&&!/\s/.test(t[e]);)n+=t[e],e++;if(!$(n))throw new Error(`Invalid element name: "${n}"`);let i="";if("E"===t[e=P(t,e)]&&C(t,"MPTY",e))e+=4;else if("A"===t[e]&&C(t,"NY",e))e+=2;else{if("("!==t[e])throw new Error(`Invalid Element Expression, found "${t[e]}"`);for(e++;e<t.length&&")"!==t[e];)i+=t[e],e++;if(")"!==t[e])throw new Error("Unterminated content model")}return{elementName:n,contentModel:i.trim(),index:e}}function C(t,e,n){for(let i=0;i<e.length;i++)if(e[i]!==t[n+i+1])return!1;return!0}function $(t){if(r(t))return t;throw new Error(`Invalid entity name ${t}`)}const j=/^[-+]?0x[a-fA-F0-9]+$/,D=/^([\-\+])?(0*)([0-9]*(\.[0-9]*)?)$/,V={hex:!0,leadingZeros:!0,decimalPoint:".",eNotation:!0};const M=/^([-+])?(0*)(\d*(\.\d*)?[eE][-\+]?\d+)$/;function _(t){return"function"==typeof t?t:Array.isArray(t)?e=>{for(const n of t){if("string"==typeof n&&e===n)return!0;if(n instanceof RegExp&&n.test(e))return!0}}:()=>!1}class k{constructor(t){this.options=t,this.currentNode=null,this.tagsNodeStack=[],this.docTypeEntities={},this.lastEntities={apos:{regex:/&(apos|#39|#x27);/g,val:"'"},gt:{regex:/&(gt|#62|#x3E);/g,val:">"},lt:{regex:/&(lt|#60|#x3C);/g,val:"<"},quot:{regex:/&(quot|#34|#x22);/g,val:'"'}},this.ampEntity={regex:/&(amp|#38|#x26);/g,val:"&"},this.htmlEntities={space:{regex:/&(nbsp|#160);/g,val:" "},cent:{regex:/&(cent|#162);/g,val:"¢"},pound:{regex:/&(pound|#163);/g,val:"£"},yen:{regex:/&(yen|#165);/g,val:"¥"},euro:{regex:/&(euro|#8364);/g,val:"€"},copyright:{regex:/&(copy|#169);/g,val:"©"},reg:{regex:/&(reg|#174);/g,val:"®"},inr:{regex:/&(inr|#8377);/g,val:"₹"},num_dec:{regex:/&#([0-9]{1,7});/g,val:(t,e)=>String.fromCodePoint(Number.parseInt(e,10))},num_hex:{regex:/&#x([0-9a-fA-F]{1,6});/g,val:(t,e)=>String.fromCodePoint(Number.parseInt(e,16))}},this.addExternalEntities=F,this.parseXml=X,this.parseTextData=L,this.resolveNameSpace=B,this.buildAttributesMap=G,this.isItStopNode=Z,this.replaceEntitiesValue=R,this.readStopNodeData=J,this.saveTextToParentTag=q,this.addChild=Y,this.ignoreAttributesFn=_(this.options.ignoreAttributes)}}function F(t){const e=Object.keys(t);for(let n=0;n<e.length;n++){const i=e[n];this.lastEntities[i]={regex:new RegExp("&"+i+";","g"),val:t[i]}}}function L(t,e,n,i,s,r,o){if(void 0!==t&&(this.options.trimValues&&!i&&(t=t.trim()),t.length>0)){o||(t=this.replaceEntitiesValue(t));const i=this.options.tagValueProcessor(e,t,n,s,r);return null==i?t:typeof i!=typeof t||i!==t?i:this.options.trimValues||t.trim()===t?H(t,this.options.parseTagValue,this.options.numberParseOptions):t}}function B(t){if(this.options.removeNSPrefix){const e=t.split(":"),n="/"===t.charAt(0)?"/":"";if("xmlns"===e[0])return"";2===e.length&&(t=n+e[1])}return t}const U=new RegExp("([^\\s=]+)\\s*(=\\s*(['\"])([\\s\\S]*?)\\3)?","gm");function G(t,e,n){if(!0!==this.options.ignoreAttributes&&"string"==typeof t){const n=s(t,U),i=n.length,r={};for(let t=0;t<i;t++){const i=this.resolveNameSpace(n[t][1]);if(this.ignoreAttributesFn(i,e))continue;let s=n[t][4],o=this.options.attributeNamePrefix+i;if(i.length)if(this.options.transformAttributeName&&(o=this.options.transformAttributeName(o)),"__proto__"===o&&(o="#__proto__"),void 0!==s){this.options.trimValues&&(s=s.trim()),s=this.replaceEntitiesValue(s);const t=this.options.attributeValueProcessor(i,s,e);r[o]=null==t?s:typeof t!=typeof s||t!==s?t:H(s,this.options.parseAttributeValue,this.options.numberParseOptions)}else this.options.allowBooleanAttributes&&(r[o]=!0)}if(!Object.keys(r).length)return;if(this.options.attributesGroupName){const t={};return t[this.options.attributesGroupName]=r,t}return r}}const X=function(t){t=t.replace(/\r\n?/g,"\n");const e=new T("!xml");let n=e,i="",s="";for(let r=0;r<t.length;r++)if("<"===t[r])if("/"===t[r+1]){const e=W(t,">",r,"Closing Tag is not closed.");let o=t.substring(r+2,e).trim();if(this.options.removeNSPrefix){const t=o.indexOf(":");-1!==t&&(o=o.substr(t+1))}this.options.transformTagName&&(o=this.options.transformTagName(o)),n&&(i=this.saveTextToParentTag(i,n,s));const a=s.substring(s.lastIndexOf(".")+1);if(o&&-1!==this.options.unpairedTags.indexOf(o))throw new Error(`Unpaired tag can not be used as closing tag: </${o}>`);let l=0;a&&-1!==this.options.unpairedTags.indexOf(a)?(l=s.lastIndexOf(".",s.lastIndexOf(".")-1),this.tagsNodeStack.pop()):l=s.lastIndexOf("."),s=s.substring(0,l),n=this.tagsNodeStack.pop(),i="",r=e}else if("?"===t[r+1]){let e=z(t,r,!1,"?>");if(!e)throw new Error("Pi Tag is not closed.");if(i=this.saveTextToParentTag(i,n,s),this.options.ignoreDeclaration&&"?xml"===e.tagName||this.options.ignorePiTags);else{const t=new T(e.tagName);t.add(this.options.textNodeName,""),e.tagName!==e.tagExp&&e.attrExpPresent&&(t[":@"]=this.buildAttributesMap(e.tagExp,s,e.tagName)),this.addChild(n,t,s,r)}r=e.closeIndex+1}else if("!--"===t.substr(r+1,3)){const e=W(t,"--\x3e",r+4,"Comment is not closed.");if(this.options.commentPropName){const o=t.substring(r+4,e-2);i=this.saveTextToParentTag(i,n,s),n.add(this.options.commentPropName,[{[this.options.textNodeName]:o}])}r=e}else if("!D"===t.substr(r+1,2)){const e=w(t,r);this.docTypeEntities=e.entities,r=e.i}else if("!["===t.substr(r+1,2)){const e=W(t,"]]>",r,"CDATA is not closed.")-2,o=t.substring(r+9,e);i=this.saveTextToParentTag(i,n,s);let a=this.parseTextData(o,n.tagname,s,!0,!1,!0,!0);null==a&&(a=""),this.options.cdataPropName?n.add(this.options.cdataPropName,[{[this.options.textNodeName]:o}]):n.add(this.options.textNodeName,a),r=e+2}else{let o=z(t,r,this.options.removeNSPrefix),a=o.tagName;const l=o.rawTagName;let u=o.tagExp,h=o.attrExpPresent,d=o.closeIndex;this.options.transformTagName&&(a=this.options.transformTagName(a)),n&&i&&"!xml"!==n.tagname&&(i=this.saveTextToParentTag(i,n,s,!1));const f=n;f&&-1!==this.options.unpairedTags.indexOf(f.tagname)&&(n=this.tagsNodeStack.pop(),s=s.substring(0,s.lastIndexOf("."))),a!==e.tagname&&(s+=s?"."+a:a);const c=r;if(this.isItStopNode(this.options.stopNodes,s,a)){let e="";if(u.length>0&&u.lastIndexOf("/")===u.length-1)"/"===a[a.length-1]?(a=a.substr(0,a.length-1),s=s.substr(0,s.length-1),u=a):u=u.substr(0,u.length-1),r=o.closeIndex;else if(-1!==this.options.unpairedTags.indexOf(a))r=o.closeIndex;else{const n=this.readStopNodeData(t,l,d+1);if(!n)throw new Error(`Unexpected end of ${l}`);r=n.i,e=n.tagContent}const i=new T(a);a!==u&&h&&(i[":@"]=this.buildAttributesMap(u,s,a)),e&&(e=this.parseTextData(e,a,s,!0,h,!0,!0)),s=s.substr(0,s.lastIndexOf(".")),i.add(this.options.textNodeName,e),this.addChild(n,i,s,c)}else{if(u.length>0&&u.lastIndexOf("/")===u.length-1){"/"===a[a.length-1]?(a=a.substr(0,a.length-1),s=s.substr(0,s.length-1),u=a):u=u.substr(0,u.length-1),this.options.transformTagName&&(a=this.options.transformTagName(a));const t=new T(a);a!==u&&h&&(t[":@"]=this.buildAttributesMap(u,s,a)),this.addChild(n,t,s,c),s=s.substr(0,s.lastIndexOf("."))}else{const t=new T(a);this.tagsNodeStack.push(n),a!==u&&h&&(t[":@"]=this.buildAttributesMap(u,s,a)),this.addChild(n,t,s,c),n=t}i="",r=d}}else i+=t[r];return e.child};function Y(t,e,n,i){this.options.captureMetaData||(i=void 0);const s=this.options.updateTag(e.tagname,n,e[":@"]);!1===s||("string"==typeof s?(e.tagname=s,t.addChild(e,i)):t.addChild(e,i))}const R=function(t){if(this.options.processEntities){for(let e in this.docTypeEntities){const n=this.docTypeEntities[e];t=t.replace(n.regx,n.val)}for(let e in this.lastEntities){const n=this.lastEntities[e];t=t.replace(n.regex,n.val)}if(this.options.htmlEntities)for(let e in this.htmlEntities){const n=this.htmlEntities[e];t=t.replace(n.regex,n.val)}t=t.replace(this.ampEntity.regex,this.ampEntity.val)}return t};function q(t,e,n,i){return t&&(void 0===i&&(i=0===e.child.length),void 0!==(t=this.parseTextData(t,e.tagname,n,!1,!!e[":@"]&&0!==Object.keys(e[":@"]).length,i))&&""!==t&&e.add(this.options.textNodeName,t),t=""),t}function Z(t,e,n){const i="*."+n;for(const n in t){const s=t[n];if(i===s||e===s)return!0}return!1}function W(t,e,n,i){const s=t.indexOf(e,n);if(-1===s)throw new Error(i);return s+e.length-1}function z(t,e,n,i=">"){const s=function(t,e,n=">"){let i,s="";for(let r=e;r<t.length;r++){let e=t[r];if(i)e===i&&(i="");else if('"'===e||"'"===e)i=e;else if(e===n[0]){if(!n[1])return{data:s,index:r};if(t[r+1]===n[1])return{data:s,index:r}}else"\t"===e&&(e=" ");s+=e}}(t,e+1,i);if(!s)return;let r=s.data;const o=s.index,a=r.search(/\s/);let l=r,u=!0;-1!==a&&(l=r.substring(0,a),r=r.substring(a+1).trimStart());const h=l;if(n){const t=l.indexOf(":");-1!==t&&(l=l.substr(t+1),u=l!==s.data.substr(t+1))}return{tagName:l,tagExp:r,closeIndex:o,attrExpPresent:u,rawTagName:h}}function J(t,e,n){const i=n;let s=1;for(;n<t.length;n++)if("<"===t[n])if("/"===t[n+1]){const r=W(t,">",n,`${e} is not closed`);if(t.substring(n+2,r).trim()===e&&(s--,0===s))return{tagContent:t.substring(i,n),i:r};n=r}else if("?"===t[n+1])n=W(t,"?>",n+1,"StopNode is not closed.");else if("!--"===t.substr(n+1,3))n=W(t,"--\x3e",n+3,"StopNode is not closed.");else if("!["===t.substr(n+1,2))n=W(t,"]]>",n,"StopNode is not closed.")-2;else{const i=z(t,n,">");i&&((i&&i.tagName)===e&&"/"!==i.tagExp[i.tagExp.length-1]&&s++,n=i.closeIndex)}}function H(t,e,n){if(e&&"string"==typeof t){const e=t.trim();return"true"===e||"false"!==e&&function(t,e={}){if(e=Object.assign({},V,e),!t||"string"!=typeof t)return t;let n=t.trim();if(void 0!==e.skipLike&&e.skipLike.test(n))return t;if("0"===t)return 0;if(e.hex&&j.test(n))return function(t){if(parseInt)return parseInt(t,16);if(Number.parseInt)return Number.parseInt(t,16);if(window&&window.parseInt)return window.parseInt(t,16);throw new Error("parseInt, Number.parseInt, window.parseInt are not supported")}(n);if(-1!==n.search(/.+[eE].+/))return function(t,e,n){if(!n.eNotation)return t;const i=e.match(M);if(i){let s=i[1]||"";const r=-1===i[3].indexOf("e")?"E":"e",o=i[2],a=s?t[o.length+1]===r:t[o.length]===r;return o.length>1&&a?t:1!==o.length||!i[3].startsWith(`.${r}`)&&i[3][0]!==r?n.leadingZeros&&!a?(e=(i[1]||"")+i[3],Number(e)):t:Number(e)}return t}(t,n,e);{const s=D.exec(n);if(s){const r=s[1]||"",o=s[2];let a=(i=s[3])&&-1!==i.indexOf(".")?("."===(i=i.replace(/0+$/,""))?i="0":"."===i[0]?i="0"+i:"."===i[i.length-1]&&(i=i.substring(0,i.length-1)),i):i;const l=r?"."===t[o.length+1]:"."===t[o.length];if(!e.leadingZeros&&(o.length>1||1===o.length&&!l))return t;{const i=Number(n),s=String(i);if(0===i||-0===i)return i;if(-1!==s.search(/[eE]/))return e.eNotation?i:t;if(-1!==n.indexOf("."))return"0"===s||s===a||s===`${r}${a}`?i:t;let l=o?a:n;return o?l===s||r+l===s?i:t:l===s||l===r+s?i:t}}return t}var i}(t,n)}return void 0!==t?t:""}const K=T.getMetaDataSymbol();function Q(t,e){return tt(t,e)}function tt(t,e,n){let i;const s={};for(let r=0;r<t.length;r++){const o=t[r],a=et(o);let l="";if(l=void 0===n?a:n+"."+a,a===e.textNodeName)void 0===i?i=o[a]:i+=""+o[a];else{if(void 0===a)continue;if(o[a]){let t=tt(o[a],e,l);const n=it(t,e);void 0!==o[K]&&(t[K]=o[K]),o[":@"]?nt(t,o[":@"],l,e):1!==Object.keys(t).length||void 0===t[e.textNodeName]||e.alwaysCreateTextNode?0===Object.keys(t).length&&(e.alwaysCreateTextNode?t[e.textNodeName]="":t=""):t=t[e.textNodeName],void 0!==s[a]&&s.hasOwnProperty(a)?(Array.isArray(s[a])||(s[a]=[s[a]]),s[a].push(t)):e.isArray(a,l,n)?s[a]=[t]:s[a]=t}}}return"string"==typeof i?i.length>0&&(s[e.textNodeName]=i):void 0!==i&&(s[e.textNodeName]=i),s}function et(t){const e=Object.keys(t);for(let t=0;t<e.length;t++){const n=e[t];if(":@"!==n)return n}}function nt(t,e,n,i){if(e){const s=Object.keys(e),r=s.length;for(let o=0;o<r;o++){const r=s[o];i.isArray(r,n+"."+r,!0,!0)?t[r]=[e[r]]:t[r]=e[r]}}}function it(t,e){const{textNodeName:n}=e,i=Object.keys(t).length;return 0===i||!(1!==i||!t[n]&&"boolean"!=typeof t[n]&&0!==t[n])}class st{constructor(t){this.externalEntities={},this.options=function(t){return Object.assign({},v,t)}(t)}parse(t,e){if("string"==typeof t);else{if(!t.toString)throw new Error("XML data is accepted in String or Bytes[] form.");t=t.toString()}if(e){!0===e&&(e={});const n=a(t,e);if(!0!==n)throw Error(`${n.err.msg}:${n.err.line}:${n.err.col}`)}const n=new k(this.options);n.addExternalEntities(this.externalEntities);const i=n.parseXml(t);return this.options.preserveOrder||void 0===i?i:Q(i,this.options)}addEntity(t,e){if(-1!==e.indexOf("&"))throw new Error("Entity value can't have '&'");if(-1!==t.indexOf("&")||-1!==t.indexOf(";"))throw new Error("An entity must be set without '&' and ';'. Eg. use '#xD' for '&#xD;'");if("&"===e)throw new Error("An entity with value '&' is not permitted");this.externalEntities[t]=e}static getMetaDataSymbol(){return T.getMetaDataSymbol()}}function rt(t,e){let n="";return e.format&&e.indentBy.length>0&&(n="\n"),ot(t,e,"",n)}function ot(t,e,n,i){let s="",r=!1;for(let o=0;o<t.length;o++){const a=t[o],l=at(a);if(void 0===l)continue;let u="";if(u=0===n.length?l:`${n}.${l}`,l===e.textNodeName){let t=a[l];ut(u,e)||(t=e.tagValueProcessor(l,t),t=ht(t,e)),r&&(s+=i),s+=t,r=!1;continue}if(l===e.cdataPropName){r&&(s+=i),s+=`<![CDATA[${a[l][0][e.textNodeName]}]]>`,r=!1;continue}if(l===e.commentPropName){s+=i+`\x3c!--${a[l][0][e.textNodeName]}--\x3e`,r=!0;continue}if("?"===l[0]){const t=lt(a[":@"],e),n="?xml"===l?"":i;let o=a[l][0][e.textNodeName];o=0!==o.length?" "+o:"",s+=n+`<${l}${o}${t}?>`,r=!0;continue}let h=i;""!==h&&(h+=e.indentBy);const d=i+`<${l}${lt(a[":@"],e)}`,f=ot(a[l],e,u,h);-1!==e.unpairedTags.indexOf(l)?e.suppressUnpairedNode?s+=d+">":s+=d+"/>":f&&0!==f.length||!e.suppressEmptyNode?f&&f.endsWith(">")?s+=d+`>${f}${i}</${l}>`:(s+=d+">",f&&""!==i&&(f.includes("/>")||f.includes("</"))?s+=i+e.indentBy+f+i:s+=f,s+=`</${l}>`):s+=d+"/>",r=!0}return s}function at(t){const e=Object.keys(t);for(let n=0;n<e.length;n++){const i=e[n];if(t.hasOwnProperty(i)&&":@"!==i)return i}}function lt(t,e){let n="";if(t&&!e.ignoreAttributes)for(let i in t){if(!t.hasOwnProperty(i))continue;let s=e.attributeValueProcessor(i,t[i]);s=ht(s,e),!0===s&&e.suppressBooleanAttributes?n+=` ${i.substr(e.attributeNamePrefix.length)}`:n+=` ${i.substr(e.attributeNamePrefix.length)}="${s}"`}return n}function ut(t,e){let n=(t=t.substr(0,t.length-e.textNodeName.length-1)).substr(t.lastIndexOf(".")+1);for(let i in e.stopNodes)if(e.stopNodes[i]===t||e.stopNodes[i]==="*."+n)return!0;return!1}function ht(t,e){if(t&&t.length>0&&e.processEntities)for(let n=0;n<e.entities.length;n++){const i=e.entities[n];t=t.replace(i.regex,i.val)}return t}const dt={attributeNamePrefix:"@_",attributesGroupName:!1,textNodeName:"#text",ignoreAttributes:!0,cdataPropName:!1,format:!1,indentBy:"  ",suppressEmptyNode:!1,suppressUnpairedNode:!0,suppressBooleanAttributes:!0,tagValueProcessor:function(t,e){return e},attributeValueProcessor:function(t,e){return e},preserveOrder:!1,commentPropName:!1,unpairedTags:[],entities:[{regex:new RegExp("&","g"),val:"&amp;"},{regex:new RegExp(">","g"),val:"&gt;"},{regex:new RegExp("<","g"),val:"&lt;"},{regex:new RegExp("'","g"),val:"&apos;"},{regex:new RegExp('"',"g"),val:"&quot;"}],processEntities:!0,stopNodes:[],oneListGroup:!1};function ft(t){this.options=Object.assign({},dt,t),!0===this.options.ignoreAttributes||this.options.attributesGroupName?this.isAttribute=function(){return!1}:(this.ignoreAttributesFn=_(this.options.ignoreAttributes),this.attrPrefixLen=this.options.attributeNamePrefix.length,this.isAttribute=gt),this.processTextOrObjNode=ct,this.options.format?(this.indentate=pt,this.tagEndChar=">\n",this.newLine="\n"):(this.indentate=function(){return""},this.tagEndChar=">",this.newLine="")}function ct(t,e,n,i){const s=this.j2x(t,n+1,i.concat(e));return void 0!==t[this.options.textNodeName]&&1===Object.keys(t).length?this.buildTextValNode(t[this.options.textNodeName],e,s.attrStr,n):this.buildObjectNode(s.val,e,s.attrStr,n)}function pt(t){return this.options.indentBy.repeat(t)}function gt(t){return!(!t.startsWith(this.options.attributeNamePrefix)||t===this.options.textNodeName)&&t.substr(this.attrPrefixLen)}ft.prototype.build=function(t){return this.options.preserveOrder?rt(t,this.options):(Array.isArray(t)&&this.options.arrayNodeName&&this.options.arrayNodeName.length>1&&(t={[this.options.arrayNodeName]:t}),this.j2x(t,0,[]).val)},ft.prototype.j2x=function(t,e,n){let i="",s="";const r=n.join(".");for(let o in t)if(Object.prototype.hasOwnProperty.call(t,o))if(void 0===t[o])this.isAttribute(o)&&(s+="");else if(null===t[o])this.isAttribute(o)||o===this.options.cdataPropName?s+="":"?"===o[0]?s+=this.indentate(e)+"<"+o+"?"+this.tagEndChar:s+=this.indentate(e)+"<"+o+"/"+this.tagEndChar;else if(t[o]instanceof Date)s+=this.buildTextValNode(t[o],o,"",e);else if("object"!=typeof t[o]){const n=this.isAttribute(o);if(n&&!this.ignoreAttributesFn(n,r))i+=this.buildAttrPairStr(n,""+t[o]);else if(!n)if(o===this.options.textNodeName){let e=this.options.tagValueProcessor(o,""+t[o]);s+=this.replaceEntitiesValue(e)}else s+=this.buildTextValNode(t[o],o,"",e)}else if(Array.isArray(t[o])){const i=t[o].length;let r="",a="";for(let l=0;l<i;l++){const i=t[o][l];if(void 0===i);else if(null===i)"?"===o[0]?s+=this.indentate(e)+"<"+o+"?"+this.tagEndChar:s+=this.indentate(e)+"<"+o+"/"+this.tagEndChar;else if("object"==typeof i)if(this.options.oneListGroup){const t=this.j2x(i,e+1,n.concat(o));r+=t.val,this.options.attributesGroupName&&i.hasOwnProperty(this.options.attributesGroupName)&&(a+=t.attrStr)}else r+=this.processTextOrObjNode(i,o,e,n);else if(this.options.oneListGroup){let t=this.options.tagValueProcessor(o,i);t=this.replaceEntitiesValue(t),r+=t}else r+=this.buildTextValNode(i,o,"",e)}this.options.oneListGroup&&(r=this.buildObjectNode(r,o,a,e)),s+=r}else if(this.options.attributesGroupName&&o===this.options.attributesGroupName){const e=Object.keys(t[o]),n=e.length;for(let s=0;s<n;s++)i+=this.buildAttrPairStr(e[s],""+t[o][e[s]])}else s+=this.processTextOrObjNode(t[o],o,e,n);return{attrStr:i,val:s}},ft.prototype.buildAttrPairStr=function(t,e){return e=this.options.attributeValueProcessor(t,""+e),e=this.replaceEntitiesValue(e),this.options.suppressBooleanAttributes&&"true"===e?" "+t:" "+t+'="'+e+'"'},ft.prototype.buildObjectNode=function(t,e,n,i){if(""===t)return"?"===e[0]?this.indentate(i)+"<"+e+n+"?"+this.tagEndChar:this.indentate(i)+"<"+e+n+this.closeTag(e)+this.tagEndChar;{let s="</"+e+this.tagEndChar,r="";return"?"===e[0]&&(r="?",s=""),!n&&""!==n||-1!==t.indexOf("<")?!1!==this.options.commentPropName&&e===this.options.commentPropName&&0===r.length?this.indentate(i)+`\x3c!--${t}--\x3e`+this.newLine:this.indentate(i)+"<"+e+n+r+this.tagEndChar+t+this.indentate(i)+s:this.indentate(i)+"<"+e+n+r+">"+t+s}},ft.prototype.closeTag=function(t){let e="";return-1!==this.options.unpairedTags.indexOf(t)?this.options.suppressUnpairedNode||(e="/"):e=this.options.suppressEmptyNode?"/":`></${t}`,e},ft.prototype.buildTextValNode=function(t,e,n,i){if(!1!==this.options.cdataPropName&&e===this.options.cdataPropName)return this.indentate(i)+`<![CDATA[${t}]]>`+this.newLine;if(!1!==this.options.commentPropName&&e===this.options.commentPropName)return this.indentate(i)+`\x3c!--${t}--\x3e`+this.newLine;if("?"===e[0])return this.indentate(i)+"<"+e+n+"?"+this.tagEndChar;{let s=this.options.tagValueProcessor(e,t);return s=this.replaceEntitiesValue(s),""===s?this.indentate(i)+"<"+e+n+this.closeTag(e)+this.tagEndChar:this.indentate(i)+"<"+e+n+">"+s+"</"+e+this.tagEndChar}},ft.prototype.replaceEntitiesValue=function(t){if(t&&t.length>0&&this.options.processEntities)for(let e=0;e<this.options.entities.length;e++){const n=this.options.entities[e];t=t.replace(n.regex,n.val)}return t};const mt={validate:a};module.exports=e})();
+(()=>{"use strict";var t={d:(e,n)=>{for(var i in n)t.o(n,i)&&!t.o(e,i)&&Object.defineProperty(e,i,{enumerable:!0,get:n[i]})},o:(t,e)=>Object.prototype.hasOwnProperty.call(t,e),r:t=>{"undefined"!=typeof Symbol&&Symbol.toStringTag&&Object.defineProperty(t,Symbol.toStringTag,{value:"Module"}),Object.defineProperty(t,"__esModule",{value:!0})}},e={};t.r(e),t.d(e,{XMLBuilder:()=>lt,XMLParser:()=>tt,XMLValidator:()=>pt});const n=":A-Za-z_\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u02FF\\u0370-\\u037D\\u037F-\\u1FFF\\u200C-\\u200D\\u2070-\\u218F\\u2C00-\\u2FEF\\u3001-\\uD7FF\\uF900-\\uFDCF\\uFDF0-\\uFFFD",i=new RegExp("^["+n+"]["+n+"\\-.\\d\\u00B7\\u0300-\\u036F\\u203F-\\u2040]*$");function r(t,e){const n=[];let i=e.exec(t);for(;i;){const r=[];r.startIndex=e.lastIndex-i[0].length;const s=i.length;for(let t=0;t<s;t++)r.push(i[t]);n.push(r),i=e.exec(t)}return n}const s=function(t){return!(null==i.exec(t))},o={allowBooleanAttributes:!1,unpairedTags:[]};function a(t,e){e=Object.assign({},o,e);const n=[];let i=!1,r=!1;"\ufeff"===t[0]&&(t=t.substr(1));for(let o=0;o<t.length;o++)if("<"===t[o]&&"?"===t[o+1]){if(o+=2,o=u(t,o),o.err)return o}else{if("<"!==t[o]){if(l(t[o]))continue;return x("InvalidChar","char '"+t[o]+"' is not expected.",N(t,o))}{let a=o;if(o++,"!"===t[o]){o=h(t,o);continue}{let d=!1;"/"===t[o]&&(d=!0,o++);let p="";for(;o<t.length&&">"!==t[o]&&" "!==t[o]&&"\t"!==t[o]&&"\n"!==t[o]&&"\r"!==t[o];o++)p+=t[o];if(p=p.trim(),"/"===p[p.length-1]&&(p=p.substring(0,p.length-1),o--),!s(p)){let e;return e=0===p.trim().length?"Invalid space after '<'.":"Tag '"+p+"' is an invalid name.",x("InvalidTag",e,N(t,o))}const c=f(t,o);if(!1===c)return x("InvalidAttr","Attributes for '"+p+"' have open quote.",N(t,o));let b=c.value;if(o=c.index,"/"===b[b.length-1]){const n=o-b.length;b=b.substring(0,b.length-1);const r=g(b,e);if(!0!==r)return x(r.err.code,r.err.msg,N(t,n+r.err.line));i=!0}else if(d){if(!c.tagClosed)return x("InvalidTag","Closing tag '"+p+"' doesn't have proper closing.",N(t,o));if(b.trim().length>0)return x("InvalidTag","Closing tag '"+p+"' can't have attributes or invalid starting.",N(t,a));if(0===n.length)return x("InvalidTag","Closing tag '"+p+"' has not been opened.",N(t,a));{const e=n.pop();if(p!==e.tagName){let n=N(t,e.tagStartPos);return x("InvalidTag","Expected closing tag '"+e.tagName+"' (opened in line "+n.line+", col "+n.col+") instead of closing tag '"+p+"'.",N(t,a))}0==n.length&&(r=!0)}}else{const s=g(b,e);if(!0!==s)return x(s.err.code,s.err.msg,N(t,o-b.length+s.err.line));if(!0===r)return x("InvalidXml","Multiple possible root nodes found.",N(t,o));-1!==e.unpairedTags.indexOf(p)||n.push({tagName:p,tagStartPos:a}),i=!0}for(o++;o<t.length;o++)if("<"===t[o]){if("!"===t[o+1]){o++,o=h(t,o);continue}if("?"!==t[o+1])break;if(o=u(t,++o),o.err)return o}else if("&"===t[o]){const e=m(t,o);if(-1==e)return x("InvalidChar","char '&' is not expected.",N(t,o));o=e}else if(!0===r&&!l(t[o]))return x("InvalidXml","Extra text at the end",N(t,o));"<"===t[o]&&o--}}}return i?1==n.length?x("InvalidTag","Unclosed tag '"+n[0].tagName+"'.",N(t,n[0].tagStartPos)):!(n.length>0)||x("InvalidXml","Invalid '"+JSON.stringify(n.map((t=>t.tagName)),null,4).replace(/\r?\n/g,"")+"' found.",{line:1,col:1}):x("InvalidXml","Start tag expected.",1)}function l(t){return" "===t||"\t"===t||"\n"===t||"\r"===t}function u(t,e){const n=e;for(;e<t.length;e++)if("?"!=t[e]&&" "!=t[e]);else{const i=t.substr(n,e-n);if(e>5&&"xml"===i)return x("InvalidXml","XML declaration allowed only at the start of the document.",N(t,e));if("?"==t[e]&&">"==t[e+1]){e++;break}}return e}function h(t,e){if(t.length>e+5&&"-"===t[e+1]&&"-"===t[e+2]){for(e+=3;e<t.length;e++)if("-"===t[e]&&"-"===t[e+1]&&">"===t[e+2]){e+=2;break}}else if(t.length>e+8&&"D"===t[e+1]&&"O"===t[e+2]&&"C"===t[e+3]&&"T"===t[e+4]&&"Y"===t[e+5]&&"P"===t[e+6]&&"E"===t[e+7]){let n=1;for(e+=8;e<t.length;e++)if("<"===t[e])n++;else if(">"===t[e]&&(n--,0===n))break}else if(t.length>e+9&&"["===t[e+1]&&"C"===t[e+2]&&"D"===t[e+3]&&"A"===t[e+4]&&"T"===t[e+5]&&"A"===t[e+6]&&"["===t[e+7])for(e+=8;e<t.length;e++)if("]"===t[e]&&"]"===t[e+1]&&">"===t[e+2]){e+=2;break}return e}const d='"',p="'";function f(t,e){let n="",i="",r=!1;for(;e<t.length;e++){if(t[e]===d||t[e]===p)""===i?i=t[e]:i!==t[e]||(i="");else if(">"===t[e]&&""===i){r=!0;break}n+=t[e]}return""===i&&{value:n,index:e,tagClosed:r}}const c=new RegExp("(\\s*)([^\\s=]+)(\\s*=)?(\\s*(['\"])(([\\s\\S])*?)\\5)?","g");function g(t,e){const n=r(t,c),i={};for(let t=0;t<n.length;t++){if(0===n[t][1].length)return x("InvalidAttr","Attribute '"+n[t][2]+"' has no space in starting.",E(n[t]));if(void 0!==n[t][3]&&void 0===n[t][4])return x("InvalidAttr","Attribute '"+n[t][2]+"' is without value.",E(n[t]));if(void 0===n[t][3]&&!e.allowBooleanAttributes)return x("InvalidAttr","boolean attribute '"+n[t][2]+"' is not allowed.",E(n[t]));const r=n[t][2];if(!b(r))return x("InvalidAttr","Attribute '"+r+"' is an invalid name.",E(n[t]));if(i.hasOwnProperty(r))return x("InvalidAttr","Attribute '"+r+"' is repeated.",E(n[t]));i[r]=1}return!0}function m(t,e){if(";"===t[++e])return-1;if("#"===t[e])return function(t,e){let n=/\d/;for("x"===t[e]&&(e++,n=/[\da-fA-F]/);e<t.length;e++){if(";"===t[e])return e;if(!t[e].match(n))break}return-1}(t,++e);let n=0;for(;e<t.length;e++,n++)if(!(t[e].match(/\w/)&&n<20)){if(";"===t[e])break;return-1}return e}function x(t,e,n){return{err:{code:t,msg:e,line:n.line||n,col:n.col}}}function b(t){return s(t)}function N(t,e){const n=t.substring(0,e).split(/\r?\n/);return{line:n.length,col:n[n.length-1].length+1}}function E(t){return t.startIndex+t[1].length}const v={preserveOrder:!1,attributeNamePrefix:"@_",attributesGroupName:!1,textNodeName:"#text",ignoreAttributes:!0,removeNSPrefix:!1,allowBooleanAttributes:!1,parseTagValue:!0,parseAttributeValue:!1,trimValues:!0,cdataPropName:!1,numberParseOptions:{hex:!0,leadingZeros:!0,eNotation:!0},tagValueProcessor:function(t,e){return e},attributeValueProcessor:function(t,e){return e},stopNodes:[],alwaysCreateTextNode:!1,isArray:()=>!1,commentPropName:!1,unpairedTags:[],processEntities:!0,htmlEntities:!1,ignoreDeclaration:!1,ignorePiTags:!1,transformTagName:!1,transformAttributeName:!1,updateTag:function(t,e,n){return t},captureMetaData:!1};let T;T="function"!=typeof Symbol?"@@xmlMetadata":Symbol("XML Node Metadata");class y{constructor(t){this.tagname=t,this.child=[],this[":@"]={}}add(t,e){"__proto__"===t&&(t="#__proto__"),this.child.push({[t]:e})}addChild(t,e){"__proto__"===t.tagname&&(t.tagname="#__proto__"),t[":@"]&&Object.keys(t[":@"]).length>0?this.child.push({[t.tagname]:t.child,":@":t[":@"]}):this.child.push({[t.tagname]:t.child}),void 0!==e&&(this.child[this.child.length-1][T]={startIndex:e})}static getMetaDataSymbol(){return T}}class w{constructor(t){this.suppressValidationErr=!t}readDocType(t,e){const n={};if("O"!==t[e+3]||"C"!==t[e+4]||"T"!==t[e+5]||"Y"!==t[e+6]||"P"!==t[e+7]||"E"!==t[e+8])throw new Error("Invalid Tag instead of DOCTYPE");{e+=9;let i=1,r=!1,s=!1,o="";for(;e<t.length;e++)if("<"!==t[e]||s)if(">"===t[e]){if(s?"-"===t[e-1]&&"-"===t[e-2]&&(s=!1,i--):i--,0===i)break}else"["===t[e]?r=!0:o+=t[e];else{if(r&&P(t,"!ENTITY",e)){let i,r;e+=7,[i,r,e]=this.readEntityExp(t,e+1,this.suppressValidationErr),-1===r.indexOf("&")&&(n[i]={regx:RegExp(`&${i};`,"g"),val:r})}else if(r&&P(t,"!ELEMENT",e)){e+=8;const{index:n}=this.readElementExp(t,e+1);e=n}else if(r&&P(t,"!ATTLIST",e))e+=8;else if(r&&P(t,"!NOTATION",e)){e+=9;const{index:n}=this.readNotationExp(t,e+1,this.suppressValidationErr);e=n}else{if(!P(t,"!--",e))throw new Error("Invalid DOCTYPE");s=!0}i++,o=""}if(0!==i)throw new Error("Unclosed DOCTYPE")}return{entities:n,i:e}}readEntityExp(t,e){e=I(t,e);let n="";for(;e<t.length&&!/\s/.test(t[e])&&'"'!==t[e]&&"'"!==t[e];)n+=t[e],e++;if(O(n),e=I(t,e),!this.suppressValidationErr){if("SYSTEM"===t.substring(e,e+6).toUpperCase())throw new Error("External entities are not supported");if("%"===t[e])throw new Error("Parameter entities are not supported")}let i="";return[e,i]=this.readIdentifierVal(t,e,"entity"),[n,i,--e]}readNotationExp(t,e){e=I(t,e);let n="";for(;e<t.length&&!/\s/.test(t[e]);)n+=t[e],e++;!this.suppressValidationErr&&O(n),e=I(t,e);const i=t.substring(e,e+6).toUpperCase();if(!this.suppressValidationErr&&"SYSTEM"!==i&&"PUBLIC"!==i)throw new Error(`Expected SYSTEM or PUBLIC, found "${i}"`);e+=i.length,e=I(t,e);let r=null,s=null;if("PUBLIC"===i)[e,r]=this.readIdentifierVal(t,e,"publicIdentifier"),'"'!==t[e=I(t,e)]&&"'"!==t[e]||([e,s]=this.readIdentifierVal(t,e,"systemIdentifier"));else if("SYSTEM"===i&&([e,s]=this.readIdentifierVal(t,e,"systemIdentifier"),!this.suppressValidationErr&&!s))throw new Error("Missing mandatory system identifier for SYSTEM notation");return{notationName:n,publicIdentifier:r,systemIdentifier:s,index:--e}}readIdentifierVal(t,e,n){let i="";const r=t[e];if('"'!==r&&"'"!==r)throw new Error(`Expected quoted string, found "${r}"`);for(e++;e<t.length&&t[e]!==r;)i+=t[e],e++;if(t[e]!==r)throw new Error(`Unterminated ${n} value`);return[++e,i]}readElementExp(t,e){e=I(t,e);let n="";for(;e<t.length&&!/\s/.test(t[e]);)n+=t[e],e++;if(!this.suppressValidationErr&&!s(n))throw new Error(`Invalid element name: "${n}"`);let i="";if("E"===t[e=I(t,e)]&&P(t,"MPTY",e))e+=4;else if("A"===t[e]&&P(t,"NY",e))e+=2;else if("("===t[e]){for(e++;e<t.length&&")"!==t[e];)i+=t[e],e++;if(")"!==t[e])throw new Error("Unterminated content model")}else if(!this.suppressValidationErr)throw new Error(`Invalid Element Expression, found "${t[e]}"`);return{elementName:n,contentModel:i.trim(),index:e}}readAttlistExp(t,e){e=I(t,e);let n="";for(;e<t.length&&!/\s/.test(t[e]);)n+=t[e],e++;O(n),e=I(t,e);let i="";for(;e<t.length&&!/\s/.test(t[e]);)i+=t[e],e++;if(!O(i))throw new Error(`Invalid attribute name: "${i}"`);e=I(t,e);let r="";if("NOTATION"===t.substring(e,e+8).toUpperCase()){if(r="NOTATION","("!==t[e=I(t,e+=8)])throw new Error(`Expected '(', found "${t[e]}"`);e++;let n=[];for(;e<t.length&&")"!==t[e];){let i="";for(;e<t.length&&"|"!==t[e]&&")"!==t[e];)i+=t[e],e++;if(i=i.trim(),!O(i))throw new Error(`Invalid notation name: "${i}"`);n.push(i),"|"===t[e]&&(e++,e=I(t,e))}if(")"!==t[e])throw new Error("Unterminated list of notations");e++,r+=" ("+n.join("|")+")"}else{for(;e<t.length&&!/\s/.test(t[e]);)r+=t[e],e++;const n=["CDATA","ID","IDREF","IDREFS","ENTITY","ENTITIES","NMTOKEN","NMTOKENS"];if(!this.suppressValidationErr&&!n.includes(r.toUpperCase()))throw new Error(`Invalid attribute type: "${r}"`)}e=I(t,e);let s="";return"#REQUIRED"===t.substring(e,e+8).toUpperCase()?(s="#REQUIRED",e+=8):"#IMPLIED"===t.substring(e,e+7).toUpperCase()?(s="#IMPLIED",e+=7):[e,s]=this.readIdentifierVal(t,e,"ATTLIST"),{elementName:n,attributeName:i,attributeType:r,defaultValue:s,index:e}}}const I=(t,e)=>{for(;e<t.length&&/\s/.test(t[e]);)e++;return e};function P(t,e,n){for(let i=0;i<e.length;i++)if(e[i]!==t[n+i+1])return!1;return!0}function O(t){if(s(t))return t;throw new Error(`Invalid entity name ${t}`)}const A=/^[-+]?0x[a-fA-F0-9]+$/,S=/^([\-\+])?(0*)([0-9]*(\.[0-9]*)?)$/,C={hex:!0,leadingZeros:!0,decimalPoint:".",eNotation:!0};const V=/^([-+])?(0*)(\d*(\.\d*)?[eE][-\+]?\d+)$/;function $(t){return"function"==typeof t?t:Array.isArray(t)?e=>{for(const n of t){if("string"==typeof n&&e===n)return!0;if(n instanceof RegExp&&n.test(e))return!0}}:()=>!1}class D{constructor(t){this.options=t,this.currentNode=null,this.tagsNodeStack=[],this.docTypeEntities={},this.lastEntities={apos:{regex:/&(apos|#39|#x27);/g,val:"'"},gt:{regex:/&(gt|#62|#x3E);/g,val:">"},lt:{regex:/&(lt|#60|#x3C);/g,val:"<"},quot:{regex:/&(quot|#34|#x22);/g,val:'"'}},this.ampEntity={regex:/&(amp|#38|#x26);/g,val:"&"},this.htmlEntities={space:{regex:/&(nbsp|#160);/g,val:" "},cent:{regex:/&(cent|#162);/g,val:"¢"},pound:{regex:/&(pound|#163);/g,val:"£"},yen:{regex:/&(yen|#165);/g,val:"¥"},euro:{regex:/&(euro|#8364);/g,val:"€"},copyright:{regex:/&(copy|#169);/g,val:"©"},reg:{regex:/&(reg|#174);/g,val:"®"},inr:{regex:/&(inr|#8377);/g,val:"₹"},num_dec:{regex:/&#([0-9]{1,7});/g,val:(t,e)=>String.fromCodePoint(Number.parseInt(e,10))},num_hex:{regex:/&#x([0-9a-fA-F]{1,6});/g,val:(t,e)=>String.fromCodePoint(Number.parseInt(e,16))}},this.addExternalEntities=j,this.parseXml=L,this.parseTextData=M,this.resolveNameSpace=F,this.buildAttributesMap=k,this.isItStopNode=Y,this.replaceEntitiesValue=B,this.readStopNodeData=q,this.saveTextToParentTag=R,this.addChild=U,this.ignoreAttributesFn=$(this.options.ignoreAttributes)}}function j(t){const e=Object.keys(t);for(let n=0;n<e.length;n++){const i=e[n];this.lastEntities[i]={regex:new RegExp("&"+i+";","g"),val:t[i]}}}function M(t,e,n,i,r,s,o){if(void 0!==t&&(this.options.trimValues&&!i&&(t=t.trim()),t.length>0)){o||(t=this.replaceEntitiesValue(t));const i=this.options.tagValueProcessor(e,t,n,r,s);return null==i?t:typeof i!=typeof t||i!==t?i:this.options.trimValues||t.trim()===t?Z(t,this.options.parseTagValue,this.options.numberParseOptions):t}}function F(t){if(this.options.removeNSPrefix){const e=t.split(":"),n="/"===t.charAt(0)?"/":"";if("xmlns"===e[0])return"";2===e.length&&(t=n+e[1])}return t}const _=new RegExp("([^\\s=]+)\\s*(=\\s*(['\"])([\\s\\S]*?)\\3)?","gm");function k(t,e,n){if(!0!==this.options.ignoreAttributes&&"string"==typeof t){const n=r(t,_),i=n.length,s={};for(let t=0;t<i;t++){const i=this.resolveNameSpace(n[t][1]);if(this.ignoreAttributesFn(i,e))continue;let r=n[t][4],o=this.options.attributeNamePrefix+i;if(i.length)if(this.options.transformAttributeName&&(o=this.options.transformAttributeName(o)),"__proto__"===o&&(o="#__proto__"),void 0!==r){this.options.trimValues&&(r=r.trim()),r=this.replaceEntitiesValue(r);const t=this.options.attributeValueProcessor(i,r,e);s[o]=null==t?r:typeof t!=typeof r||t!==r?t:Z(r,this.options.parseAttributeValue,this.options.numberParseOptions)}else this.options.allowBooleanAttributes&&(s[o]=!0)}if(!Object.keys(s).length)return;if(this.options.attributesGroupName){const t={};return t[this.options.attributesGroupName]=s,t}return s}}const L=function(t){t=t.replace(/\r\n?/g,"\n");const e=new y("!xml");let n=e,i="",r="";const s=new w(this.options.processEntities);for(let o=0;o<t.length;o++)if("<"===t[o])if("/"===t[o+1]){const e=G(t,">",o,"Closing Tag is not closed.");let s=t.substring(o+2,e).trim();if(this.options.removeNSPrefix){const t=s.indexOf(":");-1!==t&&(s=s.substr(t+1))}this.options.transformTagName&&(s=this.options.transformTagName(s)),n&&(i=this.saveTextToParentTag(i,n,r));const a=r.substring(r.lastIndexOf(".")+1);if(s&&-1!==this.options.unpairedTags.indexOf(s))throw new Error(`Unpaired tag can not be used as closing tag: </${s}>`);let l=0;a&&-1!==this.options.unpairedTags.indexOf(a)?(l=r.lastIndexOf(".",r.lastIndexOf(".")-1),this.tagsNodeStack.pop()):l=r.lastIndexOf("."),r=r.substring(0,l),n=this.tagsNodeStack.pop(),i="",o=e}else if("?"===t[o+1]){let e=X(t,o,!1,"?>");if(!e)throw new Error("Pi Tag is not closed.");if(i=this.saveTextToParentTag(i,n,r),this.options.ignoreDeclaration&&"?xml"===e.tagName||this.options.ignorePiTags);else{const t=new y(e.tagName);t.add(this.options.textNodeName,""),e.tagName!==e.tagExp&&e.attrExpPresent&&(t[":@"]=this.buildAttributesMap(e.tagExp,r,e.tagName)),this.addChild(n,t,r,o)}o=e.closeIndex+1}else if("!--"===t.substr(o+1,3)){const e=G(t,"--\x3e",o+4,"Comment is not closed.");if(this.options.commentPropName){const s=t.substring(o+4,e-2);i=this.saveTextToParentTag(i,n,r),n.add(this.options.commentPropName,[{[this.options.textNodeName]:s}])}o=e}else if("!D"===t.substr(o+1,2)){const e=s.readDocType(t,o);this.docTypeEntities=e.entities,o=e.i}else if("!["===t.substr(o+1,2)){const e=G(t,"]]>",o,"CDATA is not closed.")-2,s=t.substring(o+9,e);i=this.saveTextToParentTag(i,n,r);let a=this.parseTextData(s,n.tagname,r,!0,!1,!0,!0);null==a&&(a=""),this.options.cdataPropName?n.add(this.options.cdataPropName,[{[this.options.textNodeName]:s}]):n.add(this.options.textNodeName,a),o=e+2}else{let s=X(t,o,this.options.removeNSPrefix),a=s.tagName;const l=s.rawTagName;let u=s.tagExp,h=s.attrExpPresent,d=s.closeIndex;this.options.transformTagName&&(a=this.options.transformTagName(a)),n&&i&&"!xml"!==n.tagname&&(i=this.saveTextToParentTag(i,n,r,!1));const p=n;p&&-1!==this.options.unpairedTags.indexOf(p.tagname)&&(n=this.tagsNodeStack.pop(),r=r.substring(0,r.lastIndexOf("."))),a!==e.tagname&&(r+=r?"."+a:a);const f=o;if(this.isItStopNode(this.options.stopNodes,r,a)){let e="";if(u.length>0&&u.lastIndexOf("/")===u.length-1)"/"===a[a.length-1]?(a=a.substr(0,a.length-1),r=r.substr(0,r.length-1),u=a):u=u.substr(0,u.length-1),o=s.closeIndex;else if(-1!==this.options.unpairedTags.indexOf(a))o=s.closeIndex;else{const n=this.readStopNodeData(t,l,d+1);if(!n)throw new Error(`Unexpected end of ${l}`);o=n.i,e=n.tagContent}const i=new y(a);a!==u&&h&&(i[":@"]=this.buildAttributesMap(u,r,a)),e&&(e=this.parseTextData(e,a,r,!0,h,!0,!0)),r=r.substr(0,r.lastIndexOf(".")),i.add(this.options.textNodeName,e),this.addChild(n,i,r,f)}else{if(u.length>0&&u.lastIndexOf("/")===u.length-1){"/"===a[a.length-1]?(a=a.substr(0,a.length-1),r=r.substr(0,r.length-1),u=a):u=u.substr(0,u.length-1),this.options.transformTagName&&(a=this.options.transformTagName(a));const t=new y(a);a!==u&&h&&(t[":@"]=this.buildAttributesMap(u,r,a)),this.addChild(n,t,r,f),r=r.substr(0,r.lastIndexOf("."))}else{const t=new y(a);this.tagsNodeStack.push(n),a!==u&&h&&(t[":@"]=this.buildAttributesMap(u,r,a)),this.addChild(n,t,r,f),n=t}i="",o=d}}else i+=t[o];return e.child};function U(t,e,n,i){this.options.captureMetaData||(i=void 0);const r=this.options.updateTag(e.tagname,n,e[":@"]);!1===r||("string"==typeof r?(e.tagname=r,t.addChild(e,i)):t.addChild(e,i))}const B=function(t){if(this.options.processEntities){for(let e in this.docTypeEntities){const n=this.docTypeEntities[e];t=t.replace(n.regx,n.val)}for(let e in this.lastEntities){const n=this.lastEntities[e];t=t.replace(n.regex,n.val)}if(this.options.htmlEntities)for(let e in this.htmlEntities){const n=this.htmlEntities[e];t=t.replace(n.regex,n.val)}t=t.replace(this.ampEntity.regex,this.ampEntity.val)}return t};function R(t,e,n,i){return t&&(void 0===i&&(i=0===e.child.length),void 0!==(t=this.parseTextData(t,e.tagname,n,!1,!!e[":@"]&&0!==Object.keys(e[":@"]).length,i))&&""!==t&&e.add(this.options.textNodeName,t),t=""),t}function Y(t,e,n){const i="*."+n;for(const n in t){const r=t[n];if(i===r||e===r)return!0}return!1}function G(t,e,n,i){const r=t.indexOf(e,n);if(-1===r)throw new Error(i);return r+e.length-1}function X(t,e,n,i=">"){const r=function(t,e,n=">"){let i,r="";for(let s=e;s<t.length;s++){let e=t[s];if(i)e===i&&(i="");else if('"'===e||"'"===e)i=e;else if(e===n[0]){if(!n[1])return{data:r,index:s};if(t[s+1]===n[1])return{data:r,index:s}}else"\t"===e&&(e=" ");r+=e}}(t,e+1,i);if(!r)return;let s=r.data;const o=r.index,a=s.search(/\s/);let l=s,u=!0;-1!==a&&(l=s.substring(0,a),s=s.substring(a+1).trimStart());const h=l;if(n){const t=l.indexOf(":");-1!==t&&(l=l.substr(t+1),u=l!==r.data.substr(t+1))}return{tagName:l,tagExp:s,closeIndex:o,attrExpPresent:u,rawTagName:h}}function q(t,e,n){const i=n;let r=1;for(;n<t.length;n++)if("<"===t[n])if("/"===t[n+1]){const s=G(t,">",n,`${e} is not closed`);if(t.substring(n+2,s).trim()===e&&(r--,0===r))return{tagContent:t.substring(i,n),i:s};n=s}else if("?"===t[n+1])n=G(t,"?>",n+1,"StopNode is not closed.");else if("!--"===t.substr(n+1,3))n=G(t,"--\x3e",n+3,"StopNode is not closed.");else if("!["===t.substr(n+1,2))n=G(t,"]]>",n,"StopNode is not closed.")-2;else{const i=X(t,n,">");i&&((i&&i.tagName)===e&&"/"!==i.tagExp[i.tagExp.length-1]&&r++,n=i.closeIndex)}}function Z(t,e,n){if(e&&"string"==typeof t){const e=t.trim();return"true"===e||"false"!==e&&function(t,e={}){if(e=Object.assign({},C,e),!t||"string"!=typeof t)return t;let n=t.trim();if(void 0!==e.skipLike&&e.skipLike.test(n))return t;if("0"===t)return 0;if(e.hex&&A.test(n))return function(t){if(parseInt)return parseInt(t,16);if(Number.parseInt)return Number.parseInt(t,16);if(window&&window.parseInt)return window.parseInt(t,16);throw new Error("parseInt, Number.parseInt, window.parseInt are not supported")}(n);if(-1!==n.search(/.+[eE].+/))return function(t,e,n){if(!n.eNotation)return t;const i=e.match(V);if(i){let r=i[1]||"";const s=-1===i[3].indexOf("e")?"E":"e",o=i[2],a=r?t[o.length+1]===s:t[o.length]===s;return o.length>1&&a?t:1!==o.length||!i[3].startsWith(`.${s}`)&&i[3][0]!==s?n.leadingZeros&&!a?(e=(i[1]||"")+i[3],Number(e)):t:Number(e)}return t}(t,n,e);{const r=S.exec(n);if(r){const s=r[1]||"",o=r[2];let a=(i=r[3])&&-1!==i.indexOf(".")?("."===(i=i.replace(/0+$/,""))?i="0":"."===i[0]?i="0"+i:"."===i[i.length-1]&&(i=i.substring(0,i.length-1)),i):i;const l=s?"."===t[o.length+1]:"."===t[o.length];if(!e.leadingZeros&&(o.length>1||1===o.length&&!l))return t;{const i=Number(n),r=String(i);if(0===i||-0===i)return i;if(-1!==r.search(/[eE]/))return e.eNotation?i:t;if(-1!==n.indexOf("."))return"0"===r||r===a||r===`${s}${a}`?i:t;let l=o?a:n;return o?l===r||s+l===r?i:t:l===r||l===s+r?i:t}}return t}var i}(t,n)}return void 0!==t?t:""}const W=y.getMetaDataSymbol();function K(t,e){return Q(t,e)}function Q(t,e,n){let i;const r={};for(let s=0;s<t.length;s++){const o=t[s],a=z(o);let l="";if(l=void 0===n?a:n+"."+a,a===e.textNodeName)void 0===i?i=o[a]:i+=""+o[a];else{if(void 0===a)continue;if(o[a]){let t=Q(o[a],e,l);const n=H(t,e);void 0!==o[W]&&(t[W]=o[W]),o[":@"]?J(t,o[":@"],l,e):1!==Object.keys(t).length||void 0===t[e.textNodeName]||e.alwaysCreateTextNode?0===Object.keys(t).length&&(e.alwaysCreateTextNode?t[e.textNodeName]="":t=""):t=t[e.textNodeName],void 0!==r[a]&&r.hasOwnProperty(a)?(Array.isArray(r[a])||(r[a]=[r[a]]),r[a].push(t)):e.isArray(a,l,n)?r[a]=[t]:r[a]=t}}}return"string"==typeof i?i.length>0&&(r[e.textNodeName]=i):void 0!==i&&(r[e.textNodeName]=i),r}function z(t){const e=Object.keys(t);for(let t=0;t<e.length;t++){const n=e[t];if(":@"!==n)return n}}function J(t,e,n,i){if(e){const r=Object.keys(e),s=r.length;for(let o=0;o<s;o++){const s=r[o];i.isArray(s,n+"."+s,!0,!0)?t[s]=[e[s]]:t[s]=e[s]}}}function H(t,e){const{textNodeName:n}=e,i=Object.keys(t).length;return 0===i||!(1!==i||!t[n]&&"boolean"!=typeof t[n]&&0!==t[n])}class tt{constructor(t){this.externalEntities={},this.options=function(t){return Object.assign({},v,t)}(t)}parse(t,e){if("string"!=typeof t&&t.toString)t=t.toString();else if("string"!=typeof t)throw new Error("XML data is accepted in String or Bytes[] form.");if(e){!0===e&&(e={});const n=a(t,e);if(!0!==n)throw Error(`${n.err.msg}:${n.err.line}:${n.err.col}`)}const n=new D(this.options);n.addExternalEntities(this.externalEntities);const i=n.parseXml(t);return this.options.preserveOrder||void 0===i?i:K(i,this.options)}addEntity(t,e){if(-1!==e.indexOf("&"))throw new Error("Entity value can't have '&'");if(-1!==t.indexOf("&")||-1!==t.indexOf(";"))throw new Error("An entity must be set without '&' and ';'. Eg. use '#xD' for '&#xD;'");if("&"===e)throw new Error("An entity with value '&' is not permitted");this.externalEntities[t]=e}static getMetaDataSymbol(){return y.getMetaDataSymbol()}}function et(t,e){let n="";return e.format&&e.indentBy.length>0&&(n="\n"),nt(t,e,"",n)}function nt(t,e,n,i){let r="",s=!1;for(let o=0;o<t.length;o++){const a=t[o],l=it(a);if(void 0===l)continue;let u="";if(u=0===n.length?l:`${n}.${l}`,l===e.textNodeName){let t=a[l];st(u,e)||(t=e.tagValueProcessor(l,t),t=ot(t,e)),s&&(r+=i),r+=t,s=!1;continue}if(l===e.cdataPropName){s&&(r+=i),r+=`<![CDATA[${a[l][0][e.textNodeName]}]]>`,s=!1;continue}if(l===e.commentPropName){r+=i+`\x3c!--${a[l][0][e.textNodeName]}--\x3e`,s=!0;continue}if("?"===l[0]){const t=rt(a[":@"],e),n="?xml"===l?"":i;let o=a[l][0][e.textNodeName];o=0!==o.length?" "+o:"",r+=n+`<${l}${o}${t}?>`,s=!0;continue}let h=i;""!==h&&(h+=e.indentBy);const d=i+`<${l}${rt(a[":@"],e)}`,p=nt(a[l],e,u,h);-1!==e.unpairedTags.indexOf(l)?e.suppressUnpairedNode?r+=d+">":r+=d+"/>":p&&0!==p.length||!e.suppressEmptyNode?p&&p.endsWith(">")?r+=d+`>${p}${i}</${l}>`:(r+=d+">",p&&""!==i&&(p.includes("/>")||p.includes("</"))?r+=i+e.indentBy+p+i:r+=p,r+=`</${l}>`):r+=d+"/>",s=!0}return r}function it(t){const e=Object.keys(t);for(let n=0;n<e.length;n++){const i=e[n];if(t.hasOwnProperty(i)&&":@"!==i)return i}}function rt(t,e){let n="";if(t&&!e.ignoreAttributes)for(let i in t){if(!t.hasOwnProperty(i))continue;let r=e.attributeValueProcessor(i,t[i]);r=ot(r,e),!0===r&&e.suppressBooleanAttributes?n+=` ${i.substr(e.attributeNamePrefix.length)}`:n+=` ${i.substr(e.attributeNamePrefix.length)}="${r}"`}return n}function st(t,e){let n=(t=t.substr(0,t.length-e.textNodeName.length-1)).substr(t.lastIndexOf(".")+1);for(let i in e.stopNodes)if(e.stopNodes[i]===t||e.stopNodes[i]==="*."+n)return!0;return!1}function ot(t,e){if(t&&t.length>0&&e.processEntities)for(let n=0;n<e.entities.length;n++){const i=e.entities[n];t=t.replace(i.regex,i.val)}return t}const at={attributeNamePrefix:"@_",attributesGroupName:!1,textNodeName:"#text",ignoreAttributes:!0,cdataPropName:!1,format:!1,indentBy:"  ",suppressEmptyNode:!1,suppressUnpairedNode:!0,suppressBooleanAttributes:!0,tagValueProcessor:function(t,e){return e},attributeValueProcessor:function(t,e){return e},preserveOrder:!1,commentPropName:!1,unpairedTags:[],entities:[{regex:new RegExp("&","g"),val:"&amp;"},{regex:new RegExp(">","g"),val:"&gt;"},{regex:new RegExp("<","g"),val:"&lt;"},{regex:new RegExp("'","g"),val:"&apos;"},{regex:new RegExp('"',"g"),val:"&quot;"}],processEntities:!0,stopNodes:[],oneListGroup:!1};function lt(t){this.options=Object.assign({},at,t),!0===this.options.ignoreAttributes||this.options.attributesGroupName?this.isAttribute=function(){return!1}:(this.ignoreAttributesFn=$(this.options.ignoreAttributes),this.attrPrefixLen=this.options.attributeNamePrefix.length,this.isAttribute=dt),this.processTextOrObjNode=ut,this.options.format?(this.indentate=ht,this.tagEndChar=">\n",this.newLine="\n"):(this.indentate=function(){return""},this.tagEndChar=">",this.newLine="")}function ut(t,e,n,i){const r=this.j2x(t,n+1,i.concat(e));return void 0!==t[this.options.textNodeName]&&1===Object.keys(t).length?this.buildTextValNode(t[this.options.textNodeName],e,r.attrStr,n):this.buildObjectNode(r.val,e,r.attrStr,n)}function ht(t){return this.options.indentBy.repeat(t)}function dt(t){return!(!t.startsWith(this.options.attributeNamePrefix)||t===this.options.textNodeName)&&t.substr(this.attrPrefixLen)}lt.prototype.build=function(t){return this.options.preserveOrder?et(t,this.options):(Array.isArray(t)&&this.options.arrayNodeName&&this.options.arrayNodeName.length>1&&(t={[this.options.arrayNodeName]:t}),this.j2x(t,0,[]).val)},lt.prototype.j2x=function(t,e,n){let i="",r="";const s=n.join(".");for(let o in t)if(Object.prototype.hasOwnProperty.call(t,o))if(void 0===t[o])this.isAttribute(o)&&(r+="");else if(null===t[o])this.isAttribute(o)||o===this.options.cdataPropName?r+="":"?"===o[0]?r+=this.indentate(e)+"<"+o+"?"+this.tagEndChar:r+=this.indentate(e)+"<"+o+"/"+this.tagEndChar;else if(t[o]instanceof Date)r+=this.buildTextValNode(t[o],o,"",e);else if("object"!=typeof t[o]){const n=this.isAttribute(o);if(n&&!this.ignoreAttributesFn(n,s))i+=this.buildAttrPairStr(n,""+t[o]);else if(!n)if(o===this.options.textNodeName){let e=this.options.tagValueProcessor(o,""+t[o]);r+=this.replaceEntitiesValue(e)}else r+=this.buildTextValNode(t[o],o,"",e)}else if(Array.isArray(t[o])){const i=t[o].length;let s="",a="";for(let l=0;l<i;l++){const i=t[o][l];if(void 0===i);else if(null===i)"?"===o[0]?r+=this.indentate(e)+"<"+o+"?"+this.tagEndChar:r+=this.indentate(e)+"<"+o+"/"+this.tagEndChar;else if("object"==typeof i)if(this.options.oneListGroup){const t=this.j2x(i,e+1,n.concat(o));s+=t.val,this.options.attributesGroupName&&i.hasOwnProperty(this.options.attributesGroupName)&&(a+=t.attrStr)}else s+=this.processTextOrObjNode(i,o,e,n);else if(this.options.oneListGroup){let t=this.options.tagValueProcessor(o,i);t=this.replaceEntitiesValue(t),s+=t}else s+=this.buildTextValNode(i,o,"",e)}this.options.oneListGroup&&(s=this.buildObjectNode(s,o,a,e)),r+=s}else if(this.options.attributesGroupName&&o===this.options.attributesGroupName){const e=Object.keys(t[o]),n=e.length;for(let r=0;r<n;r++)i+=this.buildAttrPairStr(e[r],""+t[o][e[r]])}else r+=this.processTextOrObjNode(t[o],o,e,n);return{attrStr:i,val:r}},lt.prototype.buildAttrPairStr=function(t,e){return e=this.options.attributeValueProcessor(t,""+e),e=this.replaceEntitiesValue(e),this.options.suppressBooleanAttributes&&"true"===e?" "+t:" "+t+'="'+e+'"'},lt.prototype.buildObjectNode=function(t,e,n,i){if(""===t)return"?"===e[0]?this.indentate(i)+"<"+e+n+"?"+this.tagEndChar:this.indentate(i)+"<"+e+n+this.closeTag(e)+this.tagEndChar;{let r="</"+e+this.tagEndChar,s="";return"?"===e[0]&&(s="?",r=""),!n&&""!==n||-1!==t.indexOf("<")?!1!==this.options.commentPropName&&e===this.options.commentPropName&&0===s.length?this.indentate(i)+`\x3c!--${t}--\x3e`+this.newLine:this.indentate(i)+"<"+e+n+s+this.tagEndChar+t+this.indentate(i)+r:this.indentate(i)+"<"+e+n+s+">"+t+r}},lt.prototype.closeTag=function(t){let e="";return-1!==this.options.unpairedTags.indexOf(t)?this.options.suppressUnpairedNode||(e="/"):e=this.options.suppressEmptyNode?"/":`></${t}`,e},lt.prototype.buildTextValNode=function(t,e,n,i){if(!1!==this.options.cdataPropName&&e===this.options.cdataPropName)return this.indentate(i)+`<![CDATA[${t}]]>`+this.newLine;if(!1!==this.options.commentPropName&&e===this.options.commentPropName)return this.indentate(i)+`\x3c!--${t}--\x3e`+this.newLine;if("?"===e[0])return this.indentate(i)+"<"+e+n+"?"+this.tagEndChar;{let r=this.options.tagValueProcessor(e,t);return r=this.replaceEntitiesValue(r),""===r?this.indentate(i)+"<"+e+n+this.closeTag(e)+this.tagEndChar:this.indentate(i)+"<"+e+n+">"+r+"</"+e+this.tagEndChar}},lt.prototype.replaceEntitiesValue=function(t){if(t&&t.length>0&&this.options.processEntities)for(let e=0;e<this.options.entities.length;e++){const n=this.options.entities[e];t=t.replace(n.regex,n.val)}return t};const pt={validate:a};module.exports=e})();
 
 /***/ }),
 
@@ -88431,7 +87628,7 @@ function randomUUID() {
 /***/ ((module) => {
 
 "use strict";
-module.exports = /*#__PURE__*/JSON.parse('{"name":"@actions/cache","version":"4.0.5","preview":true,"description":"Actions cache lib","keywords":["github","actions","cache"],"homepage":"https://github.com/actions/toolkit/tree/main/packages/cache","license":"MIT","main":"lib/cache.js","types":"lib/cache.d.ts","directories":{"lib":"lib","test":"__tests__"},"files":["lib","!.DS_Store"],"publishConfig":{"access":"public"},"repository":{"type":"git","url":"git+https://github.com/actions/toolkit.git","directory":"packages/cache"},"scripts":{"audit-moderate":"npm install && npm audit --json --audit-level=moderate > audit.json","test":"echo \\"Error: run tests from root\\" && exit 1","tsc":"tsc"},"bugs":{"url":"https://github.com/actions/toolkit/issues"},"dependencies":{"@actions/core":"^1.11.1","@actions/exec":"^1.0.1","@actions/glob":"^0.1.0","@protobuf-ts/runtime-rpc":"^2.11.1","@actions/http-client":"^2.1.1","@actions/io":"^1.0.1","@azure/abort-controller":"^1.1.0","@azure/ms-rest-js":"^2.6.0","@azure/storage-blob":"^12.13.0","semver":"^6.3.1"},"devDependencies":{"@types/node":"^22.13.9","@types/semver":"^6.0.0","@protobuf-ts/plugin":"^2.9.4","typescript":"^5.2.2"}}');
+module.exports = /*#__PURE__*/JSON.parse('{"name":"@actions/cache","version":"4.1.0","preview":true,"description":"Actions cache lib","keywords":["github","actions","cache"],"homepage":"https://github.com/actions/toolkit/tree/main/packages/cache","license":"MIT","main":"lib/cache.js","types":"lib/cache.d.ts","directories":{"lib":"lib","test":"__tests__"},"files":["lib","!.DS_Store"],"publishConfig":{"access":"public"},"repository":{"type":"git","url":"git+https://github.com/actions/toolkit.git","directory":"packages/cache"},"scripts":{"audit-moderate":"npm install && npm audit --json --audit-level=moderate > audit.json","test":"echo \\"Error: run tests from root\\" && exit 1","tsc":"tsc"},"bugs":{"url":"https://github.com/actions/toolkit/issues"},"dependencies":{"@actions/core":"^1.11.1","@actions/exec":"^1.0.1","@actions/glob":"^0.1.0","@protobuf-ts/runtime-rpc":"^2.11.1","@actions/http-client":"^2.1.1","@actions/io":"^1.0.1","@azure/abort-controller":"^1.1.0","@azure/ms-rest-js":"^2.6.0","@azure/storage-blob":"^12.13.0","semver":"^6.3.1"},"devDependencies":{"@types/node":"^22.13.9","@types/semver":"^6.0.0","@protobuf-ts/plugin":"^2.9.4","typescript":"^5.2.2"}}');
 
 /***/ })
 
@@ -88468,34 +87665,6 @@ module.exports = /*#__PURE__*/JSON.parse('{"name":"@actions/cache","version":"4.
 /******/ 	}
 /******/ 	
 /************************************************************************/
-/******/ 	/* webpack/runtime/define property getters */
-/******/ 	(() => {
-/******/ 		// define getter functions for harmony exports
-/******/ 		__nccwpck_require__.d = (exports, definition) => {
-/******/ 			for(var key in definition) {
-/******/ 				if(__nccwpck_require__.o(definition, key) && !__nccwpck_require__.o(exports, key)) {
-/******/ 					Object.defineProperty(exports, key, { enumerable: true, get: definition[key] });
-/******/ 				}
-/******/ 			}
-/******/ 		};
-/******/ 	})();
-/******/ 	
-/******/ 	/* webpack/runtime/hasOwnProperty shorthand */
-/******/ 	(() => {
-/******/ 		__nccwpck_require__.o = (obj, prop) => (Object.prototype.hasOwnProperty.call(obj, prop))
-/******/ 	})();
-/******/ 	
-/******/ 	/* webpack/runtime/make namespace object */
-/******/ 	(() => {
-/******/ 		// define __esModule on exports
-/******/ 		__nccwpck_require__.r = (exports) => {
-/******/ 			if(typeof Symbol !== 'undefined' && Symbol.toStringTag) {
-/******/ 				Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
-/******/ 			}
-/******/ 			Object.defineProperty(exports, '__esModule', { value: true });
-/******/ 		};
-/******/ 	})();
-/******/ 	
 /******/ 	/* webpack/runtime/compat */
 /******/ 	
 /******/ 	if (typeof __nccwpck_require__ !== 'undefined') __nccwpck_require__.ab = __dirname + "/";
@@ -88505,7 +87674,7 @@ module.exports = /*#__PURE__*/JSON.parse('{"name":"@actions/cache","version":"4.
 /******/ 	// startup
 /******/ 	// Load entry module and return exports
 /******/ 	// This entry module is referenced by other modules so it can't be inlined
-/******/ 	var __webpack_exports__ = __nccwpck_require__(5105);
+/******/ 	var __webpack_exports__ = __nccwpck_require__(79407);
 /******/ 	module.exports = __webpack_exports__;
 /******/ 	
 /******/ })()
