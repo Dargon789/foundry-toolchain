@@ -38,7 +38,7 @@ jobs:
           - network: tempo
             config:
               os: windows-latest
-              arch: x32
+              arch: x86
     permissions:
       contents: read
     steps:
